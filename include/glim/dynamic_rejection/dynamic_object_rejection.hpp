@@ -4,7 +4,7 @@
 #include <gtsam_points/types/gaussian_voxelmap.hpp>
 
 
-namespace glim {
+namespace dynamic_glim {
 struct DynamicObjectRejectionParams {
     public: 
         DynamicObjectRejectionParams();

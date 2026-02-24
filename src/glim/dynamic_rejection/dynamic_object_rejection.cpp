@@ -7,7 +7,7 @@
 #include <gtsam_points/type/gaussian_voxelmap_cpu.hpp>
 
 
-namespace glim {
+namespace dynamic_glim {
 DynamicObjectRecognitionParams::DynamicObjectRecognitionParams() {
     Config config(GlobalConfig::get_config_path("config_odometry"));
     mean_difference_threshold = config.param<double>("dynamic_object_rejection", "mean_difference_threshold", 0.5);
@@ -24,9 +24,6 @@ DynamicObjectRecognitionParams::DynamicObjectRecognitionParams() {
     voxelmap_scaling_factor = config.param<double>("odometry_estimation", "voxelmap_scaling_factor", 2.0);
 
     dynamic_voxels_indices.clear();
-    is_dynamic_voxel.clear();
-    
-
 }
 
 
@@ -49,14 +46,15 @@ std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelize(const PreprocessedFram
     frame->add_covs(covs);
     frame->add_normals(normals);
 
-    std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelmaps;
+    std::vector<gtsam_points::DynamicGaussianVoxelMap::Ptr> voxelmaps;
     double current_resolution = params_.voxel_resolution;
     for (int i = 0; i < params_.voxelmap_levels; ++i) {
-        #ifdef GTSAM_POINTS_USE_CUDA
-            auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapGPU>(resolution, 8192 * 2, 10, 1e-3, *stream);
-        #else
-            auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(current_resolution);
-        #endif
+        // #ifdef GTSAM_POINTS_USE_CUDA
+        //     auto voxelmap = std::make_shared<gtsam_points::DynamicGaussianVoxelMapGPU>(current_resolution, 8192 * 2, 10, 1e-3, *stream);
+        // #else
+        //     auto voxelmap = std::make_shared<gtsam_points::DynamicGaussianVoxelMapCPU>(current_resolution);
+        // #endif
+        auto voxelmap = std::make_shared<gtsam_points::DynamicGaussianVoxelMapCPU>(current_resolution);
         voxelmap->insert(frame);
         voxelmaps.push_back(voxelmap);
         current_resolution *= params_.voxelmap_scaling_factor;
@@ -64,10 +62,12 @@ std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelize(const PreprocessedFram
             current_resolution = params_.voxel_resolution_max;
         }
     }
+    
     return voxelmaps;
+
 }
 
-std::vector<gtsam_points::GaussianVoxelMap::Ptr> add_odometry(const std::vector<gtsam_points::GaussianVoxelMap::Ptr>& voxelmaps){
+std::vector<gtsam_points::GaussianVoxelMap::Ptr> add_odometry(const std::vector<gtsam_points::GaussianVoxelMap::Ptr>& voxelmaps, const Eigen::Isometry3d& T_world_imu){
     // This function would apply the necessary transformations to the voxelmaps based on the estimated odometry. 
     // The specific implementation would depend on how the odometry information is represented and how it should be applied to the voxelmaps.
     // For example, if you have an estimated pose for the current frame, you could transform the voxelmaps accordingly to align them with a common reference frame.
@@ -113,14 +113,39 @@ PreprocessedFrame::Ptr dynamic_object_rejection(const PreprocessedFrame::Ptr fra
                     }
                 }
             }
-            
         }
     }
+    last_voxelmap=voxelmaps.back();
+    gtsam_points::PointCloudCPU::Ptr new_frame = std::make_shared<gtsam_points::PointCloudCPU>();
+    for (int i = 0; i < last_voxelmap->num_voxel(); i++)
+    {
+        auto current_voxel = last_voxelmap->lookup_voxel(i);
+        if(current_voxel.is_dynamic){
+            dynamic_voxels_indices.push_back(i);
+        }else{
+            // Add points from this voxel to the new frame
+            new_frame->add_points(current_voxel.points);
+            if (frame->intensities.size()) {
+                for (int j = 0; j < current_voxel.points.size(); j++) {
+                    new_frame->add_intensity(frame->intensities[current_voxel.point_indices[j]]);
+                }
+            }
+        }
+    }
+    PreprocessedFrame::Ptr dynamic_rejection_frame(new PreprocessedFrame);
+    dynamic_rejection_frame->stamp = frame->stamp;
+    dynamic_rejection_frame->scan_end_time = frame->scan_end_time;
+    dynamic_rejection_frame->times = frame->times; // You might want to filter these as well based on the dynamic points
+    dynamic_rejection_frame->points = new_frame->points;
+    if (new_frame->intensities.size()) {
+        dynamic_rejection_frame->intensities = new_frame->intensities;
+    }
+    dynamic_rejection_frame->k_neighbors = frame->k_neighbors;
+    dynamic_rejection_frame->neighbors = find_neighbors(new_frame->points, new_frame->size(), frame->k_neighbors);
     
-    // This is a placeholder for the actual implementation of the comparison logic, which would involve checking the mean and covariance differences, as well as the number of points in each voxel, against the specified thresholds.
 
-    // For now, we will just return the input frame without any modifications.
-    return frame;
+
+    return dynamic_rejection_frame;
 }
 
 
