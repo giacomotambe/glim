@@ -45,7 +45,7 @@ public:
      * @brief Get the indices of points classified as dynamic
      * @return std::vector<int> Indices of dynamic points
      */
-  std::vector<int> get_dynamic_points_indices() const { return dynamic_points_indices; }
+  std::vector<int> get_dynamic_points_indices() const { return dynamic_voxels_indices; }
 private:
   // Voxelize the input frame and return a vector of GaussianVoxelMaps at different resolutions
   std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelize(const PreprocessedFrame::Ptr& frame);
@@ -56,8 +56,8 @@ private:
 
 private:
     DynamicObjectRecognitionParams params_;
-    std::vector<int> dynamic_points_indices; 
-
+    std::vector<int> dynamic_voxels_indices;
+    std::vector<std::vector<bool>> is_dynamic_voxel; // This vector will store whether each voxel is classified as dynamic or not 
 };
 
 }

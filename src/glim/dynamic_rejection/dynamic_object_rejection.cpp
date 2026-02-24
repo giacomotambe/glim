@@ -23,6 +23,10 @@ DynamicObjectRecognitionParams::DynamicObjectRecognitionParams() {
     voxelmap_levels = config.param<int>("odometry_estimation", "voxelmap_levels", 2);
     voxelmap_scaling_factor = config.param<double>("odometry_estimation", "voxelmap_scaling_factor", 2.0);
 
+    dynamic_voxels_indices.clear();
+    is_dynamic_voxel.clear();
+    
+
 }
 
 
@@ -48,7 +52,11 @@ std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelize(const PreprocessedFram
     std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelmaps;
     double current_resolution = params_.voxel_resolution;
     for (int i = 0; i < params_.voxelmap_levels; ++i) {
-        auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMap>(current_resolution);
+        #ifdef GTSAM_POINTS_USE_CUDA
+            auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapGPU>(resolution, 8192 * 2, 10, 1e-3, *stream);
+        #else
+            auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(current_resolution);
+        #endif
         voxelmap->insert(frame);
         voxelmaps.push_back(voxelmap);
         current_resolution *= params_.voxelmap_scaling_factor;
@@ -69,41 +77,43 @@ PreprocessedFrame::Ptr dynamic_object_rejection(const PreprocessedFrame::Ptr fra
     // Voxelize the current frame
     auto voxelmaps = voxelize(frame);
     // Add odometry information to the voxelmaps
-    auto prev_voxelmaps = prev_frame->voxelmaps[i];
+    
     add_odometry(voxelmaps);
     // Compare the voxelmaps of the current frame with those of the previous frame to identify dynamic points
     for (int i = 0; i < voxelmaps.size(); i++)
     {
+        auto prev_voxelmap = prev_frame->voxelmaps[i];
         if (prev_frame && i < prev_frame->voxelmaps.size()) {
             auto current_voxelmap = voxelmaps[i];
-            
-
             // Compare each voxel in the current voxelmap with the corresponding voxel in the previous voxelmap
-            for (const auto& current_voxel : current_voxelmap->voxels()) {
-                auto prev_voxel = prev_voxelmap->get_voxel(current_voxel.first);
-                if (prev_voxel) {
+            for (int j = 0; j < current_voxelmap->num_voxel(); j++) {
+                if(current_voxel.is_dynamic){
+                    auto current_voxel = current_voxelmap->lookup_voxel(j);
+                    auto prev_voxel = prev_voxelmap->lookup_voxel(j);
+                    
                     // Check mean difference
-                    double mean_diff = (current_voxel.second.mean - prev_voxel->mean).norm();
-                    if (mean_diff > params_.mean_difference_threshold) {
+                    double mean_diff = (current_voxel.mean - prev_voxel.mean).norm();
+                    if (mean_diff < params_.mean_difference_threshold) {
                         // Mark this voxel as dynamic
-                        current_voxel.second.is_dynamic = true;
+                        current_voxel.is_dynamic = false;
                     }
 
                     // Check covariance difference
-                    double cov_diff = (current_voxel.second.cov - prev_voxel->cov).norm();
-                    if (cov_diff > params_.covariance_error_threshold) {
+                    double cov_diff = (current_voxel.cov - prev_voxel.cov).norm();
+                    if (cov_diff < params_.covariance_error_threshold) {
                         // Mark this voxel as dynamic
-                        current_voxel.second.is_dynamic = true;
+                        current_voxel.is_dynamic = false;
                     }
 
                     // Check points number difference
-                    int points_diff = std::abs(static_cast<int>(current_voxel.second.points.size()) - static_cast<int>(prev_voxel->points.size()));
-                    if (points_diff > params_.points_number_difference_treshhold) {
+                    int points_diff = std::abs(current_voxel.num_points - prev_voxel.num_points);
+                    if (points_diff < params_.points_number_difference_threshold) {
                         // Mark this voxel as dynamic
-                        current_voxel.second.is_dynamic = true;
+                        current_voxel.is_dynamic = false;
                     }
                 }
             }
+            
         }
     }
     
