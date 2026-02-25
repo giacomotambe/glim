@@ -6,14 +6,14 @@
 #include <gtsam_points/types/gaussian_voxelmap.hpp>
 #include <gtsam_points/ann/incremental_voxelmap.hpp>
 
-namespace dynamic_glim {
+namespace glim {
 struct DynamicGaussianVoxel : public gtsam_points::GaussianVoxel
 {
     public:
         using Ptr = std::shared_ptr<DynamicGaussianVoxel>;
         using ConstPtr = std::shared_ptr<const DynamicGaussianVoxel>;
 
-        DynamicGaussianVoxel() : gtsam_points::GaussianVoxel(), is_dynamic(false) {point_indices.clear();}
+        DynamicGaussianVoxel() : gtsam_points::GaussianVoxel(), is_dynamic(true) {point_indices.clear();}
     public:
         bool is_dynamic;
         std::vector<Eigen::Vector4d> voxel_points; 
@@ -46,4 +46,4 @@ class DynamicVoxelMapCPU : public gtsam_points::GaussianVoxelMapCPU , public gts
 
 }
 
-}
+}  // namespace glim

@@ -8,11 +8,11 @@
 #include <gtsam_points/ann/impl/incremental_voxelmap_impl.hpp>
 
 namespace dynamic_glim {
-DynamicObjectRejectionParams::DynamicObjectRejectionParams() {
+DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU() {
     Config config(GlobalConfig::get_config_path("config_odometry"));
     mean_difference_threshold = config.param<double>("dynamic_object_rejection", "mean_difference_threshold", 0.5);
     covariance_error_threshold = config.param<double>("dynamic_object_rejection", "covariance_error_threshold", 0.5);
-    points_number_difference_treshhold = config.param<int>("dynamic_object_rejection", "points_number_difference_treshhold", 10);
+    points_number_difference_threshold = config.param<int>("dynamic_object_rejection", "points_number_difference_threshold", 10);
 
     //this one must be the same as the one used for odometry estimation to ensure consistency in voxelization
     voxel_resolution = config.param<double>("odometry_estimation", "voxel_resolution", 0.5);
@@ -27,9 +27,9 @@ DynamicObjectRejectionParams::DynamicObjectRejectionParams() {
 }
 
 
-DynamicObjectRejectionParams::~DynamicObjectRejectionParams() {}
+DynamicObjectRejectionParamsCPU::~DynamicObjectRejectionParamsCPU() {}
 
-std::vector<DynamicVoxelMap::Ptr> voxelize(const PreprocessedFrame::Ptr& raw_frame){
+std::vector<DynamicVoxelMap::Ptr> DynamicObjectRejectionCPU::voxelize(const PreprocessedFrame::Ptr& raw_frame){
     std::vector<Eigen::Vector4d> points_imu(raw_frame->size());
     for (int i = 0; i < raw_frame->size(); i++) {
       points_imu[i] = T_imu_lidar * raw_frame->points[i];
@@ -49,11 +49,6 @@ std::vector<DynamicVoxelMap::Ptr> voxelize(const PreprocessedFrame::Ptr& raw_fra
     std::vector<DynamicVoxelMap::Ptr> voxelmaps;
     double current_resolution = params_.voxel_resolution;
     for (int i = 0; i < params_.voxelmap_levels; ++i) {
-        // #ifdef GTSAM_POINTS_USE_CUDA
-        //     auto voxelmap = std::make_shared<gtsam_points::DynamicGaussianVoxelMapGPU>(current_resolution, 8192 * 2, 10, 1e-3, *stream);
-        // #else
-        //     auto voxelmap = std::make_shared<gtsam_points::DynamicGaussianVoxelMapCPU>(current_resolution);
-        // #endif
         auto voxelmap = std::make_shared<DynamicVoxelMapCPU>(current_resolution);
         voxelmap->insert(frame);
         voxelmaps.push_back(voxelmap);
@@ -67,17 +62,19 @@ std::vector<DynamicVoxelMap::Ptr> voxelize(const PreprocessedFrame::Ptr& raw_fra
 
 }
 
-std::vector<gtsam_points::GaussianVoxelMap::Ptr> add_odometry(const std::vector<gtsam_points::GaussianVoxelMap::Ptr>& voxelmaps, const Eigen::Isometry3d& T_world_imu){
+std::vector<gtsam_points::GaussianVoxelMap::Ptr> DynamicObjectRejectionCPU::add_odometry(const std::vector<gtsam_points::GaussianVoxelMap::Ptr>& voxelmaps, const Eigen::Isometry3d& T_world_imu){
     std::vector<gtsam_points::GaussianVoxelMap::Ptr> updated_voxelmaps;
     for (const auto& voxelmap : voxelmaps) {
         auto updated_voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(voxelmap->resolution());
         for (int i = 0; i < voxelmap->num_voxel(); i++) {
             auto voxel = voxelmap->lookup_voxel(i);
             Eigen::Vector4d transformed_mean = T_world_imu * Eigen::Vector4d(voxel.mean.x(), voxel.mean.y(), voxel.mean.z(), 1.0);
-            // Here we should also transform the covariance and the points in the voxel, but for simplicity we will just update the mean
+            // Transform the covariance matrix correctly
+            Eigen::Matrix3d R = T_world_imu.rotation();
+            Eigen::Matrix3d transformed_cov = R * voxel.cov * R.transpose();
             DynamicGaussianVoxel transformed_voxel;
             transformed_voxel.mean = transformed_mean.head<3>();
-            transformed_voxel.cov = voxel.cov; // This is not correct, but we would need to apply the appropriate transformation to the covariance matrix
+            transformed_voxel.cov = transformed_cov;
             transformed_voxel.num_points = voxel.num_points;
             transformed_voxel.is_dynamic = voxel.is_dynamic;
             updated_voxelmap->add_voxel(transformed_voxel);
@@ -87,24 +84,24 @@ std::vector<gtsam_points::GaussianVoxelMap::Ptr> add_odometry(const std::vector<
     return updated_voxelmaps;
 }
 
-PreprocessedFrame::Ptr dynamic_object_rejection(const PreprocessedFrame::Ptr frame, EstimationFrame::ConstPtr prev_frame){
+PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const PreprocessedFrame::Ptr frame, EstimationFrame::ConstPtr prev_frame){
     // Voxelize the current frame
     auto voxelmaps = voxelize(frame);
+
     // Add odometry information to the voxelmaps
     //voxelmaps = add_odometry(voxelmaps, frame->T_world_imu);
 
     // Compare the voxelmaps of the current frame with those of the previous frame to identify dynamic points
     for (int i = 0; i < voxelmaps.size(); i++)
     {
-        auto prev_voxelmap = prev_frame->voxelmaps[i];
         if (prev_frame && i < prev_frame->voxelmaps.size()) {
             auto current_voxelmap = voxelmaps[i];
+            auto prev_voxelmap = prev_frame->voxelmaps[i];
             // Compare each voxel in the current voxelmap with the corresponding voxel in the previous voxelmap
             for (int j = 0; j < current_voxelmap->num_voxel(); j++) {
+                auto current_voxel = current_voxelmap->lookup_voxel(j);
+                auto prev_voxel = prev_voxelmap->lookup_voxel(j);
                 if(current_voxel.is_dynamic){
-                    auto current_voxel = current_voxelmap->lookup_voxel(j);
-                    auto prev_voxel = prev_voxelmap->lookup_voxel(j);
-                    
                     // Check mean difference
                     double mean_diff = (current_voxel.mean - prev_voxel.mean).norm();
                     if (mean_diff < params_.mean_difference_threshold) {
@@ -125,6 +122,9 @@ PreprocessedFrame::Ptr dynamic_object_rejection(const PreprocessedFrame::Ptr fra
                         // Mark this voxel as dynamic
                         current_voxel.is_dynamic = false;
                     }
+                }else{
+                    auto current_voxel = current_voxelmap->lookup_voxel(j);
+                    current_voxel.is_dynamic = false;
                 }
             }
         }

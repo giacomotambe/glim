@@ -1,6 +1,6 @@
 #include "glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp"
 
-namespace dynamic_glim {
+namespace glim {
 template class IncrementalVoxelMap<DynamicGaussianVoxel>;
 
 void DynamicGaussianVoxel::add(const Setting& setting, const PointCloud& points, size_t i) {

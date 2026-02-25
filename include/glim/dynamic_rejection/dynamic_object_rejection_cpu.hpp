@@ -4,11 +4,11 @@
 #include <gtsam_points/types/gaussian_voxelmap.hpp>
 
 
-namespace dynamic_glim {
-struct DynamicObjectRejectionParams {
+namespace glim {
+struct DynamicObjectRejectionParamsCPU {
     public: 
-        DynamicObjectRejectionParams();
-        ~DynamicObjectRejectionParams();
+        DynamicObjectRejectionParamsCPU();
+        ~DynamicObjectRejectionParamsCPU();
     
     public:
         double mean_difference_threshold; ///< Threshold for mean difference to classify a point as dynamic
@@ -21,17 +21,17 @@ struct DynamicObjectRejectionParams {
         int voxelmap_levels;
         double voxelmap_scaling_factor;
 
-}
+};
 
 
-class DynamicObjectRejection {
+class DynamicObjectRejectionCPU {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
     /**
      * @brief Constructor
      */
-  DynamicObjectRejection(const DynamicObjectRejectionParams& params = DynamicObjectRejectionParams());
+  DynamicObjectRejectionCPU(const DynamicObjectRejectionParamsCPU& params = DynamicObjectRejectionParamsCPU());
 
     /**
      * @brief Recognize dynamic objects in the current frame by comparing it with the previous frame and return a new estimation frame without points classified as dynamic.
@@ -48,16 +48,15 @@ public:
   std::vector<int> get_dynamic_points_indices() const { return dynamic_voxels_indices; }
 private:
   // Voxelize the input frame and return a vector of GaussianVoxelMaps at different resolutions
-  std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelize(const PreprocessedFrame::Ptr& frame);
+  std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelize(const PreprocessedFrame::Ptr& frame, const Eigen::Isometry3d& T_imu_lidar, CloudCovarianceEstimation& covariance_estimation);
 
   // Add odometry information to the voxelmaps (e.g., by transforming them according to the estimated pose) and return the updated voxelmaps
-  void add_odometry(const std::vector<gtsam_points::GaussianVoxelMap::Ptr>& voxelmaps);
-
+   std::vector<gtsam_points::GaussianVoxelMap::Ptr> add_odometry(const std::vector<gtsam_points::GaussianVoxelMap::Ptr>& voxelmaps, const Eigen::Isometry3d& T_world_imu);
 
 private:
-    DynamicObjectRecognitionParams params_;
+    DynamicObjectRejectionParamsCPU params_;
     std::vector<int> dynamic_voxels_indices;
     std::vector<std::vector<bool>> is_dynamic_voxel; // This vector will store whether each voxel is classified as dynamic or not 
 };
 
-}
+}  // namespace glim

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(glim VERSION 1.2.1 LANGUAGES CXX)
+project(glim VERSION 1.3.0 LANGUAGES CXX)
 
 add_compile_options(-std=c++17)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/cmake")
@@ -14,6 +14,7 @@ option(BUILD_WITH_CUDA_MULTIARCH "Build with GPU cross-platform support" OFF)
 option(BUILD_WITH_VIEWER "Build with visualizer" ON)
 option(BUILD_WITH_MARCH_NATIVE "Build with -march=native" OFF)
 option(BUILD_WITH_OPENCV "Build with OpenCV to support camera images" ON)
+option(BUILD_WITH_DYNAMIC_REJECTION "Build with dynamic object rejection" OFF)
 
 if(BUILD_WITH_MARCH_NATIVE)
   add_definitions(-march=native)
@@ -38,6 +39,12 @@ if(BUILD_WITH_OPENCV)
   find_package(OpenCV REQUIRED COMPONENTS core)
 else()
   set(GLIM_USE_OPENCV 0)
+endif()
+
+if(BUILD_WITH_DYNAMIC_REJECTION)
+  set(GLIM_USE_DYNAMIC_REJECTION 1)
+else()
+  set(GLIM_USE_DYNAMIC_REJECTION 0)
 endif()
 
 ###########
@@ -95,6 +102,10 @@ add_library(glim SHARED
   src/glim/mapping/sub_mapping_passthrough.cpp
   src/glim/mapping/global_mapping.cpp
   src/glim/mapping/global_mapping_pose_graph.cpp
+  # dynamic rejection
+  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/dynamic_object_rejection_cpu.cpp>
+  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/dynamic_voxelmap_cpu.cpp>
+  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/async_dynamic_object_rejection_cpu.cpp>
   # GPU-related
   ${GPU_SRCS}
 )
@@ -117,6 +128,9 @@ target_link_libraries(glim
 )
 if(BUILD_WITH_OPENCV)
   target_compile_definitions(glim PUBLIC GLIM_USE_OPENCV)
+endif()
+if(BUILD_WITH_DYNAMIC_REJECTION)
+  target_compile_definitions(glim PUBLIC GLIM_USE_DYNAMIC_REJECTION)
 endif()
 list(APPEND glim_LIBRARIES glim)
 
