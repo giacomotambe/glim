@@ -1,14 +1,14 @@
 #include <Eigen/Geometry>
 
-#include <glim/dynamic_rejection/dynamic_object_rejection.hpp>
+#include <glim/dynamic_rejection/dynamic_object_rejection_cpu.hpp>
 
 #include <gtsam_points/types/point_cloud_cpu.hpp>
-#include <gtsam_points/type/gaussian_voxelmap_gpu.hpp>
-#include <gtsam_points/type/gaussian_voxelmap_cpu.hpp>
-
+#include <glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp>
+#include <glim/preprocess/cloud_preprocessor.hpp>
+#include <gtsam_points/ann/impl/incremental_voxelmap_impl.hpp>
 
 namespace dynamic_glim {
-DynamicObjectRecognitionParams::DynamicObjectRecognitionParams() {
+DynamicObjectRejectionParams::DynamicObjectRejectionParams() {
     Config config(GlobalConfig::get_config_path("config_odometry"));
     mean_difference_threshold = config.param<double>("dynamic_object_rejection", "mean_difference_threshold", 0.5);
     covariance_error_threshold = config.param<double>("dynamic_object_rejection", "covariance_error_threshold", 0.5);
@@ -27,9 +27,9 @@ DynamicObjectRecognitionParams::DynamicObjectRecognitionParams() {
 }
 
 
-DynamicObjectRecognitionParams::~DynamicObjectRecognitionParams() {}
+DynamicObjectRejectionParams::~DynamicObjectRejectionParams() {}
 
-std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelize(const PreprocessedFrame::Ptr& raw_frame){
+std::vector<DynamicVoxelMap::Ptr> voxelize(const PreprocessedFrame::Ptr& raw_frame){
     std::vector<Eigen::Vector4d> points_imu(raw_frame->size());
     for (int i = 0; i < raw_frame->size(); i++) {
       points_imu[i] = T_imu_lidar * raw_frame->points[i];
@@ -46,7 +46,7 @@ std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelize(const PreprocessedFram
     frame->add_covs(covs);
     frame->add_normals(normals);
 
-    std::vector<gtsam_points::DynamicGaussianVoxelMap::Ptr> voxelmaps;
+    std::vector<DynamicVoxelMap::Ptr> voxelmaps;
     double current_resolution = params_.voxel_resolution;
     for (int i = 0; i < params_.voxelmap_levels; ++i) {
         // #ifdef GTSAM_POINTS_USE_CUDA
@@ -54,7 +54,7 @@ std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelize(const PreprocessedFram
         // #else
         //     auto voxelmap = std::make_shared<gtsam_points::DynamicGaussianVoxelMapCPU>(current_resolution);
         // #endif
-        auto voxelmap = std::make_shared<gtsam_points::DynamicGaussianVoxelMapCPU>(current_resolution);
+        auto voxelmap = std::make_shared<DynamicVoxelMapCPU>(current_resolution);
         voxelmap->insert(frame);
         voxelmaps.push_back(voxelmap);
         current_resolution *= params_.voxelmap_scaling_factor;
@@ -68,17 +68,31 @@ std::vector<gtsam_points::GaussianVoxelMap::Ptr> voxelize(const PreprocessedFram
 }
 
 std::vector<gtsam_points::GaussianVoxelMap::Ptr> add_odometry(const std::vector<gtsam_points::GaussianVoxelMap::Ptr>& voxelmaps, const Eigen::Isometry3d& T_world_imu){
-    // This function would apply the necessary transformations to the voxelmaps based on the estimated odometry. 
-    // The specific implementation would depend on how the odometry information is represented and how it should be applied to the voxelmaps.
-    // For example, if you have an estimated pose for the current frame, you could transform the voxelmaps accordingly to align them with a common reference frame.
+    std::vector<gtsam_points::GaussianVoxelMap::Ptr> updated_voxelmaps;
+    for (const auto& voxelmap : voxelmaps) {
+        auto updated_voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(voxelmap->resolution());
+        for (int i = 0; i < voxelmap->num_voxel(); i++) {
+            auto voxel = voxelmap->lookup_voxel(i);
+            Eigen::Vector4d transformed_mean = T_world_imu * Eigen::Vector4d(voxel.mean.x(), voxel.mean.y(), voxel.mean.z(), 1.0);
+            // Here we should also transform the covariance and the points in the voxel, but for simplicity we will just update the mean
+            DynamicGaussianVoxel transformed_voxel;
+            transformed_voxel.mean = transformed_mean.head<3>();
+            transformed_voxel.cov = voxel.cov; // This is not correct, but we would need to apply the appropriate transformation to the covariance matrix
+            transformed_voxel.num_points = voxel.num_points;
+            transformed_voxel.is_dynamic = voxel.is_dynamic;
+            updated_voxelmap->add_voxel(transformed_voxel);
+        }
+        updated_voxelmaps.push_back(updated_voxelmap);
+    }
+    return updated_voxelmaps;
 }
 
 PreprocessedFrame::Ptr dynamic_object_rejection(const PreprocessedFrame::Ptr frame, EstimationFrame::ConstPtr prev_frame){
     // Voxelize the current frame
     auto voxelmaps = voxelize(frame);
     // Add odometry information to the voxelmaps
-    
-    add_odometry(voxelmaps);
+    //voxelmaps = add_odometry(voxelmaps, frame->T_world_imu);
+
     // Compare the voxelmaps of the current frame with those of the previous frame to identify dynamic points
     for (int i = 0; i < voxelmaps.size(); i++)
     {
@@ -117,6 +131,7 @@ PreprocessedFrame::Ptr dynamic_object_rejection(const PreprocessedFrame::Ptr fra
     }
     last_voxelmap=voxelmaps.back();
     gtsam_points::PointCloudCPU::Ptr new_frame = std::make_shared<gtsam_points::PointCloudCPU>();
+    std::vector<Eigen::Vector4d> temp_point; 
     for (int i = 0; i < last_voxelmap->num_voxel(); i++)
     {
         auto current_voxel = last_voxelmap->lookup_voxel(i);
@@ -124,18 +139,18 @@ PreprocessedFrame::Ptr dynamic_object_rejection(const PreprocessedFrame::Ptr fra
             dynamic_voxels_indices.push_back(i);
         }else{
             // Add points from this voxel to the new frame
-            new_frame->add_points(current_voxel.points);
+
+            new_frame->add_points(current_voxel->voxel_points);
             if (frame->intensities.size()) {
-                for (int j = 0; j < current_voxel.points.size(); j++) {
-                    new_frame->add_intensity(frame->intensities[current_voxel.point_indices[j]]);
-                }
+                new_frame->add_intensities(current_voxel->voxel_intensities);
             }
+            new_frame->add_times(current_voxel->voxel_times);
         }
     }
     PreprocessedFrame::Ptr dynamic_rejection_frame(new PreprocessedFrame);
     dynamic_rejection_frame->stamp = frame->stamp;
     dynamic_rejection_frame->scan_end_time = frame->scan_end_time;
-    dynamic_rejection_frame->times = frame->times; // You might want to filter these as well based on the dynamic points
+    dynamic_rejection_frame->times = new_frame->times; // You might want to filter these as well based on the dynamic points
     dynamic_rejection_frame->points = new_frame->points;
     if (new_frame->intensities.size()) {
         dynamic_rejection_frame->intensities = new_frame->intensities;
