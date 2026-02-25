@@ -1,4 +1,5 @@
-#include <Eigen/
+#include <Eigen/Geometry>
+#include <Eigen/Core>
 
 #include <gtsam_points/type/gaussian_voxelmap_cpu.hpp>
 #include <gtsam_points/types/point_cloud.hpp>
