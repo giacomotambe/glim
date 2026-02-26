@@ -70,7 +70,7 @@
     ],
     // Topics
     "imu_topic": "/imu/data",
-    "points_topic": "/velodyne_points",
+    "points_topic": "/velodyne_points/points",
     "image_topic": "/camera/image",
     // QoS options
     "imu_qos": {
