@@ -12,6 +12,7 @@ include_guard()
 set(BUILD_WITH_CUDA @BUILD_WITH_CUDA@)
 set(BUILD_WITH_VIEWER @BUILD_WITH_VIEWER@)
 set(GLIM_USE_OPENCV @GLIM_USE_OPENCV@)
+set(GLIM_USE_DYNAMIC_REJECTION @GLIM_USE_DYNAMIC_REJECTION@)
 
 include(CMakeFindDependencyMacro)
 find_dependency(Boost REQUIRED serialization)
