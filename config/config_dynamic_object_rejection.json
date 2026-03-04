@@ -1,0 +1,24 @@
+{
+  /*** Parameters used by the CPU-based dynamic object rejection module ***/
+  "dynamic_object_rejection": {
+    // threshold for mean difference between corresponding voxels
+    "mean_difference_threshold": 0.5,
+    // threshold for covariance error to flag voxels as dynamic
+    "covariance_error_threshold": 0.5,
+    // minimum change in point count to consider voxel dynamic
+    "points_number_difference_threshold": 10,
+    "num_threads": 4
+  },
+
+  /*** odometry_estimation section is reused by the rejection code to obtain
+       voxelization parameters.  Values here should match whatever is used
+       by the odometry estimator to keep the maps consistent. ***/
+  "odometry_estimation": {
+    "voxel_resolution": 0.5,
+    "voxel_resolution_max": 0.5,
+    "voxel_resolution_dmin": 4.0,
+    "voxel_resolution_dmax": 12.0,
+    "voxelmap_levels": 2,
+    "voxelmap_scaling_factor": 2.0 
+  }
+}
