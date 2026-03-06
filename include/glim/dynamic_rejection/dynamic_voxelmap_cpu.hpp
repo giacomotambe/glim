@@ -9,18 +9,24 @@
 #include <gtsam_points/ann/incremental_voxelmap.hpp>
 
 namespace gtsam_points {
+// Forward declaration
+class DynamicVoxelMapCPU;
+
 struct DynamicGaussianVoxel : public gtsam_points::GaussianVoxel
 {
     public:
         using Ptr = std::shared_ptr<DynamicGaussianVoxel>;
         using ConstPtr = std::shared_ptr<const DynamicGaussianVoxel>;
 
-        DynamicGaussianVoxel() : gtsam_points::GaussianVoxel(), is_dynamic(true) {}
+        DynamicGaussianVoxel() : gtsam_points::GaussianVoxel(), is_dynamic(false), voxel_point_cloud(nullptr), finest_voxelmap(nullptr) {}
     public:
         bool is_dynamic;
         std::vector<Eigen::Vector4d> voxel_points; 
         std::vector<double> voxel_intensities;
         std::vector<double> voxel_times;
+        PointCloudCPU::Ptr voxel_point_cloud; // store the history of this voxel for dynamic classification
+        std::shared_ptr<DynamicVoxelMapCPU> finest_voxelmap; // store the history of this voxel for dynamic classification
+
 
         // override must use fully qualified Setting type
         void add(const gtsam_points::GaussianVoxel::Setting& setting, const gtsam_points::PointCloud& points, size_t i);    
@@ -104,7 +110,7 @@ struct traits<DynamicVoxelMapCPU> {
 };
 }
 
-}  // namespace glim
+}  // namespace gtsam_points
 
 
 

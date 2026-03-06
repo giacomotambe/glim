@@ -4,6 +4,7 @@
 #include <iostream>
 #include <unordered_set>
 
+#include <spdlog/spdlog.h>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
@@ -17,30 +18,35 @@ template class IncrementalVoxelMap<DynamicGaussianVoxel>;
 
 
 DynamicVoxelMapCPU::DynamicVoxelMapCPU(double resolution) : IncrementalVoxelMap<DynamicGaussianVoxel>(resolution) {
-  offsets = neighbor_offsets(1);
+  offsets = neighbor_offsets(1); 
 }
 
 void DynamicGaussianVoxel::add(const GaussianVoxel::Setting& setting, const PointCloud& points, size_t i) {
+    if (!points.points) {
+        return;
+    }
+
     if (finalized) {
         this->finalized = false;
         this->mean *= num_points;
         this->cov *= num_points;
     }
-
     num_points++;
+    
     this->mean += points.points[i];
     this->cov += points.covs[i];
+    
     this->voxel_points.push_back(points.points[i]);
-    this->voxel_intensities.push_back(points.intensities[i]);
+    this->voxel_intensities.push_back(points.intensities[i]);   
     this->voxel_times.push_back(points.times[i]);
-    this->is_dynamic = true; // default to dynamic until proven otherwise
+    
 
     if (frame::has_intensities(points)) {
         this->intensity = std::max(this->intensity, frame::intensity(points, i));
     }
 }
 
- DynamicGaussianVoxel& DynamicVoxelMapCPU::lookup_voxel(int voxel_id) {
+DynamicGaussianVoxel& DynamicVoxelMapCPU::lookup_voxel(int voxel_id) {
     return flat_voxels[voxel_id]->second;
 }
 
@@ -49,13 +55,37 @@ const DynamicGaussianVoxel& DynamicVoxelMapCPU::lookup_voxel(int voxel_id) const
 }
 
 void DynamicVoxelMapCPU::insert(const PointCloud& frame) {
+    spdlog::info("[DynamicVoxelMapCPU::insert] Inserting frame with {} points", frame.size());
+    
+    if (frame.size() == 0) {
+        spdlog::warn("[DynamicVoxelMapCPU::insert] Frame has 0 points, skipping insert");
+        return;
+    }
+    
     IncrementalVoxelMap<DynamicGaussianVoxel>::insert(frame);
-    // // After inserting the frame, we need to update the is_dynamic flag of each voxel based on the new data. This is a placeholder for the actual logic to determine if a voxel is dynamic or not, which
-    // // would likely involve comparing the new voxel data with previous frames or using some heuristic based on the voxel's properties (e.g., mean, covariance, number of points).
-    // for (int i = 0; i < num_voxels(); i++) {
-    //     auto& voxel = flat_voxels[i]->second;
-    //     voxel.is_dynamic = true;
-    // }
+    
+    spdlog::info("[DynamicVoxelMapCPU::insert] Frame inserted, initializing {} voxels", num_voxels());
+    
+    for (int i = 0; i < num_voxels(); i++) {
+        auto& voxel = flat_voxels[i]->second;
+        voxel.is_dynamic = false; // initialize as static, will be updated later in the dynamic object rejection process
+        voxel.voxel_point_cloud = std::make_shared<PointCloudCPU>();
+        
+        if (!voxel.voxel_points.empty()) {
+            voxel.voxel_point_cloud->add_points(voxel.voxel_points);
+        }
+        
+        if (!voxel.voxel_intensities.empty()) {
+            voxel.voxel_point_cloud->add_intensities(voxel.voxel_intensities);
+        }
+        
+        if (!voxel.voxel_times.empty()) {
+            voxel.voxel_point_cloud->add_times(voxel.voxel_times);
+        }
+    
+    }
+    
+    spdlog::info("[DynamicVoxelMapCPU::insert] All voxels initialized");
 }
 
 
@@ -121,5 +151,6 @@ void DynamicVoxelMapCPU::save_compact(const std::string& path) const {
         }
     }
 }
+
 
 }
