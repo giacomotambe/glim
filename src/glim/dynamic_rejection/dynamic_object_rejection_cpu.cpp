@@ -200,22 +200,18 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
 
 
     for (int j = 0; j < compare_nvox; j++) {
-        spdlog::info("[dynamic_rejection] comparing voxel {}: current_num_points={} prev_num_points={}", j, current_voxelmap->lookup_voxel(j).num_points, prev_voxelmap->lookup_voxel(j).num_points);
-        spdlog::info("[dynamic_rejection] voxel analisys  {}, recursive_level={}", j, recursive_level);
         auto& current_voxel = current_voxelmap->lookup_voxel(j);
         // auto coord = current_voxelmap->voxel_coord(current_voxel.mean);
         // int voxel_index = current_voxelmap->lookup_voxel_index(coord);
         // auto& prev_voxel = prev_voxelmap->lookup_voxel(voxel_index);
         auto& prev_voxel = prev_voxelmap->lookup_voxel(j);
         double mean_diff = (current_voxel.mean - prev_voxel.mean).norm();
-        spdlog::info("[dynamic_rejection] voxel {} marked dynamic (mean_diff={})", j, mean_diff);
         if (mean_diff > params_.mean_difference_threshold) {
             current_voxel.is_dynamic = true;
         }
 
         
         double cov_diff = (current_voxel.cov - prev_voxel.cov).norm();
-        spdlog::info("[dynamic_rejection] voxel {} marked dynamic (cov_diff={})", j, cov_diff);
         if (cov_diff > params_.covariance_error_threshold) {
             current_voxel.is_dynamic = true;    
         }
@@ -243,14 +239,10 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         //     }
         // }
 
-        // if (!mahalanobis_valid) {
-        //     spdlog::debug("[dynamic_rejection] voxel {} mahalanobis invalid (non-PD or non-finite covariance), skipping", j);
-        // } else {
-        //     spdlog::info("[dynamic_rejection] voxel {} mahalanobis_distance={}", j, mahalanobis_dist);
-        //     if (mahalanobis_dist > params_.mahalanobis_distance_threshold) {
-        //         current_voxel.is_dynamic = true;
-        //         spdlog::info("[dynamic_rejection] voxel {} marked dynamic (mahalanobis_dist={})", j, mahalanobis_dist);
-        //     }
+        
+
+        // if (mahalanobis_dist > params_.mahalanobis_distance_threshold) {
+        //     current_voxel.is_dynamic = true;
         // }
 
         // compute absolute difference safely by casting to signed type
@@ -258,7 +250,6 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
             long long curr_num = static_cast<long long>(current_voxel.num_points);
             long long prev_num = static_cast<long long>(prev_voxel.num_points);
             double points_diff_percent = 100.0 * std::abs(curr_num - prev_num) / static_cast<double>(prev_num);
-            spdlog::info("[dynamic_rejection] voxel {} marked dynamic (points_diff={}%)", j, points_diff_percent);
             if (points_diff_percent > params_.points_number_difference_threshold) {
                 current_voxel.is_dynamic = true;  
             }
@@ -271,16 +262,9 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
             prev_voxel.finest_voxelmap=std::make_shared<gtsam_points::DynamicVoxelMapCPU>(current_voxelmap->voxel_resolution()*0.5);
             prev_voxel.finest_voxelmap->insert(*prev_voxel.voxel_point_cloud);
             recursive_level++;
-            for(int k = 0; k < current_voxel.finest_voxelmap->num_voxels(); k++) {
-                auto& finer_current_voxel = current_voxel.finest_voxelmap->lookup_voxel(k);
-                finer_current_voxel.is_dynamic = false; // initialize as static, will be updated in the recursive dynamic object recognition process
-                spdlog::info("[dynamic_rejection] voxel {} finer voxel size {}",k, finer_current_voxel.voxel_points.size());
-            }
-            
             dynamic_object_recognition(current_voxel.finest_voxelmap, prev_voxel.finest_voxelmap);
         }  
         if(!current_voxel.is_dynamic){
-            spdlog::info("[dynamic_rejection] voxel {} is static, accumulating {} points", j, current_voxel.voxel_points.size());
             // accumulate static points for output frame
             static_points.insert(static_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
             static_intensities.insert(static_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
@@ -289,7 +273,6 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         recursive_level = 1; // reset recursive level for next voxel
         
     }
-    spdlog::info("[dynamic_rejection] classification completed: accumulated static_points={}", static_points.size());
     return current_voxelmap;
 }
 

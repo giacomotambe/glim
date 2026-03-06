@@ -22,24 +22,26 @@ DynamicVoxelMapCPU::DynamicVoxelMapCPU(double resolution) : IncrementalVoxelMap<
 }
 
 void DynamicGaussianVoxel::add(const GaussianVoxel::Setting& setting, const PointCloud& points, size_t i) {
-    if (!points.points) {
-        return;
-    }
-
     if (finalized) {
         this->finalized = false;
         this->mean *= num_points;
         this->cov *= num_points;
     }
     num_points++;
-    
-    this->mean += points.points[i];
-    this->cov += points.covs[i];
-    
+    if(points.points) {
+        this->mean += points.points[i];
+    }
+    if(points.covs) {        
+        this->cov += points.covs[i];
+    }
     this->voxel_points.push_back(points.points[i]);
-    this->voxel_intensities.push_back(points.intensities[i]);   
-    this->voxel_times.push_back(points.times[i]);
+    if (points.intensities) {
+        this->voxel_intensities.push_back(points.intensities[i]);
+    }
     
+    if (points.times) {
+        this->voxel_times.push_back(points.times[i]);
+    }
 
     if (frame::has_intensities(points)) {
         this->intensity = std::max(this->intensity, frame::intensity(points, i));
