@@ -20,13 +20,16 @@ struct DynamicObjectRejectionParamsCPU {
         double covariance_error_threshold; ///< Threshold for variance difference to classify a point as dynamic
         int points_number_difference_threshold; ///< Threshold for the number of points difference to classify a point as dynamic
         double mahalanobis_distance_threshold; ///< Threshold for Mahalanobis distance to classify a point as dynamic
+        double dynamic_score_threshold; ///< Threshold for the combined dynamic score to classify a point as dynamic
         double voxel_resolution; 
-        double voxel_resolution_max; 
-        double voxel_resolution_dmin;  
-        double voxel_resolution_dmax;
         int voxelmap_levels;
         double voxelmap_scaling_factor;
         int num_threads;
+        double w_shift;
+        double w_mahalanobis;
+        double w_covariance_difference;
+        double w_shape;
+        double w_occupancy;
 
 };
 

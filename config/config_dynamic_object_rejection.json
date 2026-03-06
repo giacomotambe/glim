@@ -5,20 +5,23 @@
     "mean_difference_threshold": 0.5,
     // threshold for covariance error to flag voxels as dynamic
     "covariance_error_threshold": 0.5,
+    "mahalanobis_distance_threshold": 5.0,
     // minimum change in point count to consider voxel dynamic
     "points_number_difference_threshold": 10,
-    "num_threads": 4
+    // threshold for the combined dynamic score to classify a point as dynamic
+    "dynamic_score_threshold": 2.5,
+    // number of threads to use for parallel processing in dynamic object rejection
+    "num_threads": 4,
+    "w_shift": 1.0,
+    "w_mahalanobis": 0.8,
+    "w_covariance_difference": 0.5,
+    "w_shape": 0.5,
+    "w_occupancy": 0.3
   },
 
-  /*** odometry_estimation section is reused by the rejection code to obtain
-       voxelization parameters.  Values here should match whatever is used
-       by the odometry estimator to keep the maps consistent. ***/
   "odometry_estimation": {
-    "voxel_resolution": 0.5,
-    "voxel_resolution_max": 0.5,
-    "voxel_resolution_dmin": 4.0,
-    "voxel_resolution_dmax": 12.0,
+    "voxel_resolution": 5.0,
     "voxelmap_levels": 2,
-    "voxelmap_scaling_factor": 2.0 
+    "voxelmap_scaling_factor": 0.5 
   }
 }

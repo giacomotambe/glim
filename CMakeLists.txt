@@ -204,7 +204,15 @@ if(BUILD_WITH_VIEWER)
     glim
   )
 
-  list(APPEND glim_LIBRARIES standard_viewer interactive_viewer memory_monitor map_editor)
+  # Dynamic rejection viewer
+  add_library(dynamic_rejection_viewer SHARED
+    src/glim/viewer/dynamic_rejection_viewer.cpp
+  )
+  target_link_libraries(dynamic_rejection_viewer
+    glim
+  )
+
+  list(APPEND glim_LIBRARIES standard_viewer interactive_viewer memory_monitor map_editor dynamic_rejection_viewer)
 endif()
 
 #############
