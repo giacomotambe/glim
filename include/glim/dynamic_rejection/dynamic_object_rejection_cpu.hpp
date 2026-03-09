@@ -2,7 +2,6 @@
 
 #include <vector>
 #include <glim/preprocess/preprocessed_frame.hpp>
-#include <glim/odometry/estimation_frame.hpp>
 #include <gtsam_points/types/gaussian_voxelmap.hpp>
 #include <glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp>
 #include <glim/common/cloud_covariance_estimation.hpp>
@@ -47,12 +46,18 @@ public:
       * @brief Get the indices of points classified as dynamic
       * @return std::vector<int> Indices of dynamic points
       */
-  PreprocessedFrame::Ptr dynamic_object_rejection(const PreprocessedFrame::Ptr frame, EstimationFrame::ConstPtr prev_frame);
+  PreprocessedFrame::Ptr dynamic_object_rejection(const PreprocessedFrame::Ptr frame);
     /**
      * @brief Get the indices of points classified as dynamic
      * @return std::vector<int> Indices of dynamic points
      */
   std::vector<int> get_dynamic_points_indices() const { return dynamic_voxels_indices; }
+
+  /**
+   * @brief Get the last dynamic frame (points classified as dynamic)
+   * @return PreprocessedFrame containing only dynamic points, or nullptr if none
+   */
+  PreprocessedFrame::Ptr get_last_dynamic_frame() const { return last_dynamic_frame; }
 private:
 
   // Add odometry information to the voxelmaps (e.g., by transforming them according to the estimated pose) and return the updated voxelmaps
@@ -76,6 +81,12 @@ private:
     std::vector<Eigen::Vector4d> static_points;
     std::vector<double> static_intensities;
     std::vector<double> static_times;
+
+    std::vector<Eigen::Vector4d> dynamic_points;
+    std::vector<double> dynamic_intensities;
+    std::vector<double> dynamic_times;
+
+    PreprocessedFrame::Ptr last_dynamic_frame;  ///< Last frame of dynamic-only points
 
     int recursive_level; // to keep track of the current level of recursion in the voxelmap hierarchy 
     std::unique_ptr<CloudCovarianceEstimation> covariance_estimation;

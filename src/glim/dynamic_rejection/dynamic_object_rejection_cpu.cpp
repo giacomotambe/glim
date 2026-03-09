@@ -88,15 +88,15 @@ std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr> DynamicObjectRejectionCPU::ad
     return voxelmaps; // for now we skip the actual transformation for simplicity; in a real implementation we would need to transform each voxel according to the estimated pose
 }
 
-PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const PreprocessedFrame::Ptr frame, EstimationFrame::ConstPtr prev_frame){
-    spdlog::info("[dynamic_rejection] dynamic_object_rejection begin: frame={} prev_frame={}", static_cast<bool>(frame), static_cast<bool>(prev_frame));
+PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const PreprocessedFrame::Ptr frame){
+    spdlog::info("[dynamic_rejection] dynamic_object_rejection begin: frame={}", static_cast<bool>(frame));
     if (!frame) {
         spdlog::warn("[dynamic_rejection] dynamic_object_rejection: null input frame");
         return nullptr;
     }
 
-    if (!prev_frame) {
-        spdlog::info("[dynamic_rejection] dynamic_object_rejection: no prev_frame, use last_voxelmaps");
+    if (!last_voxelmap) {
+        spdlog::info("[dynamic_rejection] dynamic_object_rejection: no last_voxelmap, use current voxelmap for next comparison");
     }
 
     std::vector<Eigen::Vector4d> frame_normals;
@@ -136,6 +136,9 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
     static_points.clear();
     static_intensities.clear();
     static_times.clear();
+    dynamic_points.clear();
+    dynamic_intensities.clear();
+    dynamic_times.clear();
     auto update_voxelmap = dynamic_object_recognition(voxelmap, last_voxelmap);
 
     
@@ -176,6 +179,21 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
                   dynamic_rejection_frame->points.size(),
                   dynamic_voxels_indices.size(),
                   dynamic_rejection_frame->neighbors.size());
+
+    // Build a frame containing only the dynamic points
+    if (!dynamic_points.empty()) {
+        last_dynamic_frame = std::make_shared<PreprocessedFrame>();
+        last_dynamic_frame->stamp = frame->stamp;
+        last_dynamic_frame->scan_end_time = frame->scan_end_time;
+        last_dynamic_frame->points = dynamic_points;
+        last_dynamic_frame->intensities = dynamic_intensities;
+        last_dynamic_frame->times = dynamic_times;
+        last_dynamic_frame->k_neighbors = 0;
+        spdlog::info("[dynamic_rejection] dynamic frame: {} points", dynamic_points.size());
+    } else {
+        last_dynamic_frame = nullptr;
+    }
+
     return dynamic_rejection_frame;
 }
 
@@ -367,20 +385,25 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         //     }
         // } 
         
-        if(recursive_level < params_.voxelmap_levels && current_voxel.is_dynamic) {
-            current_voxel.finest_voxelmap=std::make_shared<gtsam_points::DynamicVoxelMapCPU>(current_voxelmap->voxel_resolution()*params_.voxelmap_scaling_factor);
-            current_voxel.finest_voxelmap->insert(*current_voxel.voxel_point_cloud);
+        // if(recursive_level < params_.voxelmap_levels && current_voxel.is_dynamic) {
+        //     current_voxel.finest_voxelmap=std::make_shared<gtsam_points::DynamicVoxelMapCPU>(current_voxelmap->voxel_resolution()*params_.voxelmap_scaling_factor);
+        //     current_voxel.finest_voxelmap->insert(*current_voxel.voxel_point_cloud);
 
-            prev_voxel.finest_voxelmap=std::make_shared<gtsam_points::DynamicVoxelMapCPU>(current_voxelmap->voxel_resolution()*params_.voxelmap_scaling_factor);
-            prev_voxel.finest_voxelmap->insert(*prev_voxel.voxel_point_cloud);
-            recursive_level++;
-            dynamic_object_recognition(current_voxel.finest_voxelmap, prev_voxel.finest_voxelmap);
-        }  
+        //     prev_voxel.finest_voxelmap=std::make_shared<gtsam_points::DynamicVoxelMapCPU>(current_voxelmap->voxel_resolution()*params_.voxelmap_scaling_factor);
+        //     prev_voxel.finest_voxelmap->insert(*prev_voxel.voxel_point_cloud);
+        //     recursive_level++;
+        //     dynamic_object_recognition(current_voxel.finest_voxelmap, prev_voxel.finest_voxelmap);
+        // }  
         if(!current_voxel.is_dynamic){
             // accumulate static points for output frame
             static_points.insert(static_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
             static_intensities.insert(static_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
             static_times.insert(static_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
+        } else {
+            // accumulate dynamic points for separate output
+            dynamic_points.insert(dynamic_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
+            dynamic_intensities.insert(dynamic_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
+            dynamic_times.insert(dynamic_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
         }
         recursive_level = 1; // reset recursive level for next voxel
         

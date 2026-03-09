@@ -18,12 +18,11 @@ AsyncDynamicObjectRejection::~AsyncDynamicObjectRejection() {
   spdlog::info("[dynamic_rejection][async] dtor end");
 }
 
-void AsyncDynamicObjectRejection::insert_frame(const glim::PreprocessedFrame::Ptr& frame, glim::EstimationFrame::ConstPtr prev_frame) {
-  spdlog::info("[dynamic_rejection][async] insert_frame: frame={} prev_frame={} queue_before={}",
+void AsyncDynamicObjectRejection::insert_frame(const glim::PreprocessedFrame::Ptr& frame) {
+  spdlog::info("[dynamic_rejection][async] insert_frame: frame={} queue_before={}",
                 static_cast<bool>(frame),
-                static_cast<bool>(prev_frame),
                 input_frame_queue.size());
-  input_frame_queue.push_back(std::make_pair(frame, prev_frame));
+  input_frame_queue.push_back(frame);
 }
 
 void AsyncDynamicObjectRejection::join() {
@@ -47,12 +46,16 @@ std::vector<glim::PreprocessedFrame::Ptr> AsyncDynamicObjectRejection::get_resul
   return results;
 }
 
+std::vector<glim::PreprocessedFrame::Ptr> AsyncDynamicObjectRejection::get_dynamic_results() {
+  return dynamic_frame_queue.get_all_and_clear();
+}
+
 void AsyncDynamicObjectRejection::run() {
   spdlog::info("[dynamic_rejection][async] run thread started");
   while (!kill_switch) {
-    auto frame_pairs = input_frame_queue.get_all_and_clear();
+    auto frames = input_frame_queue.get_all_and_clear();
 
-    if (frame_pairs.empty()) {
+    if (frames.empty()) {
       if (end_of_sequence) {
         spdlog::info("[dynamic_rejection][async] run thread stopping: end_of_sequence=true");
         break;
@@ -61,20 +64,24 @@ void AsyncDynamicObjectRejection::run() {
       continue;
     }
 
-    spdlog::info("[dynamic_rejection][async] run batch: size={}", frame_pairs.size());
+    spdlog::info("[dynamic_rejection][async] run batch: size={}", frames.size());
 
-    for (const auto& frame_pair : frame_pairs) {
-      const auto& frame = frame_pair.first;
-      const auto& prev_frame = frame_pair.second;
+    for (const auto& frame : frames) {
 
       // Perform dynamic object rejection
-      auto processed_frame = dynamic_rejection->dynamic_object_rejection(frame, prev_frame);
+      auto processed_frame = dynamic_rejection->dynamic_object_rejection(frame);
       spdlog::info("[dynamic_rejection][async] processed frame: ok={} points={}",
                     static_cast<bool>(processed_frame),
                     processed_frame ? processed_frame->points.size() : 0);
 
       // Add to output queue
       output_frame_queue.push_back(processed_frame);
+
+      // Add dynamic-only frame to separate queue
+      auto dyn_frame = dynamic_rejection->get_last_dynamic_frame();
+      if (dyn_frame) {
+        dynamic_frame_queue.push_back(dyn_frame);
+      }
     }
   }
   spdlog::info("[dynamic_rejection][async] run thread exited");

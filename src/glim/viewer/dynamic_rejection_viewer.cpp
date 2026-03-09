@@ -3,6 +3,10 @@
 
 #include <spdlog/spdlog.h>
 
+// Forward-declare to avoid including GLFW/glfw3.h which conflicts with iridescence's gl3w.h
+struct GLFWwindow;
+extern "C" GLFWwindow* glfwGetCurrentContext(void);
+
 #include <glim/viewer/dynamic_rejection_viewer.hpp>
 #include <glim/odometry/callbacks.hpp>
 #include <glim/util/config.hpp>
@@ -111,37 +115,78 @@ void DynamicRejectionViewer::update_frame(const PreprocessedFrame::Ptr& frame) {
 
 void DynamicRejectionViewer::viewer_loop() {
   auto viewer = guik::LightViewer::instance(viewer_size);
-  viewer_started = true;
 
-  viewer->enable_vsync();
-  viewer->shader_setting().set_point_size(point_size);
+  // Check if this thread owns the GL context. When another viewer module
+  // (e.g. standard_viewer) has already created the LightViewer singleton,
+  // the GL context is bound to that module's thread and
+  // glfwGetCurrentContext() returns NULL on our thread.
+  const bool owns_context = (glfwGetCurrentContext() != nullptr);
 
-  if (point_size_metric) {
-    viewer->shader_setting().set_point_scale_metric();
-  }
-
-  if (point_shape_circle) {
-    viewer->shader_setting().set_point_shape_circle();
-  }
-
-  while (!kill_switch) {
-    if (!viewer->spin_once()) {
-      request_to_terminate = true;
+  if (owns_context) {
+    // Standalone mode — we created the viewer, run our own spin loop.
+    viewer->enable_vsync();
+    viewer->shader_setting().set_point_size(point_size);
+    if (point_size_metric) {
+      viewer->shader_setting().set_point_scale_metric();
+    }
+    if (point_shape_circle) {
+      viewer->shader_setting().set_point_shape_circle();
     }
 
-    std::vector<std::function<void()>> tasks;
-    {
-      std::lock_guard<std::mutex> lock(invoke_queue_mutex);
-      tasks.swap(invoke_queue);
+    viewer_started = true;
+
+    while (!kill_switch) {
+      if (!viewer->spin_once()) {
+        request_to_terminate = true;
+        break;
+      }
+
+      std::vector<std::function<void()>> tasks;
+      {
+        std::lock_guard<std::mutex> lock(invoke_queue_mutex);
+        tasks.swap(invoke_queue);
+      }
+      for (const auto& task : tasks) {
+        task();
+      }
     }
 
-    for (const auto& task : tasks) {
-      task();
+    viewer->remove_drawable("dynamic_rejection_points");
+    guik::LightViewer::destroy();
+  } else {
+    // Shared mode — another module owns the GL context.
+    // Use register_ui_callback so our tasks run on the correct GL thread.
+    viewer->register_ui_callback("dynamic_rejection_viewer", [this] {
+      std::vector<std::function<void()>> tasks;
+      {
+        std::lock_guard<std::mutex> lock(invoke_queue_mutex);
+        tasks.swap(invoke_queue);
+      }
+      for (const auto& task : tasks) {
+        task();
+      }
+    });
+
+    // Queue GL setup to execute on the GL thread
+    invoke([this] {
+      auto v = guik::LightViewer::instance();
+      v->shader_setting().set_point_size(point_size);
+      if (point_size_metric) {
+        v->shader_setting().set_point_scale_metric();
+      }
+      if (point_shape_circle) {
+        v->shader_setting().set_point_shape_circle();
+      }
+    });
+
+    viewer_started = true;
+
+    while (!kill_switch && !request_to_terminate) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+
+    viewer->register_ui_callback("dynamic_rejection_viewer", nullptr);
   }
-
-  viewer->remove_drawable("dynamic_rejection_points");
-  guik::LightViewer::destroy();
 }
 
 }  // namespace glim

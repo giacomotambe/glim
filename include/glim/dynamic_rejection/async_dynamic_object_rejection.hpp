@@ -6,7 +6,6 @@
 #include <glim/dynamic_rejection/dynamic_object_rejection_cpu.hpp>
 #include <glim/util/concurrent_vector.hpp>
 #include <glim/preprocess/preprocessed_frame.hpp>
-#include <glim/odometry/estimation_frame.hpp>
 
 namespace glim {
 
@@ -28,11 +27,10 @@ public:
   ~AsyncDynamicObjectRejection();
 
   /**
-   * @brief Insert a frame pair for dynamic object rejection
+   * @brief Insert a frame for dynamic object rejection
    * @param frame Current preprocessed frame
-   * @param prev_frame Previous estimation frame
    */
-  void insert_frame(const glim::PreprocessedFrame::Ptr& frame, glim::EstimationFrame::ConstPtr prev_frame);
+  void insert_frame(const glim::PreprocessedFrame::Ptr& frame);
 
   /**
    * @brief Wait for the dynamic rejection thread
@@ -51,6 +49,12 @@ public:
    */
   std::vector<glim::PreprocessedFrame::Ptr> get_results();
 
+  /**
+   * @brief Get the frames containing only dynamic points
+   * @return Dynamic-only frames
+   */
+  std::vector<glim::PreprocessedFrame::Ptr> get_dynamic_results();
+
 private:
   void run();
 
@@ -59,11 +63,14 @@ private:
   std::atomic_bool end_of_sequence;  // Flag to stop the thread when the input queues become empty (Soft kill switch)
   std::thread thread;
 
-  // Input queue: pairs of (current_frame, prev_frame)
-  ConcurrentVector<std::pair<glim::PreprocessedFrame::Ptr, glim::EstimationFrame::ConstPtr>> input_frame_queue;
+  // Input queue
+  ConcurrentVector<glim::PreprocessedFrame::Ptr> input_frame_queue;
 
   // Output queue
   ConcurrentVector<glim::PreprocessedFrame::Ptr> output_frame_queue;
+
+  // Dynamic-only output queue
+  ConcurrentVector<glim::PreprocessedFrame::Ptr> dynamic_frame_queue;
 
   std::shared_ptr<DynamicObjectRejectionCPU> dynamic_rejection;
 };
