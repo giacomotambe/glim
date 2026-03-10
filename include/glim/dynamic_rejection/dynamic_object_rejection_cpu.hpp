@@ -29,6 +29,7 @@ struct DynamicObjectRejectionParamsCPU {
         double w_covariance_difference;
         double w_shape;
         double w_occupancy;
+        double story_factor;
 
 };
 

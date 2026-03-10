@@ -35,6 +35,7 @@ DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU() {
     w_covariance_difference = config.param<double>("dynamic_object_rejection", "w_covariance_difference", 0.5);
     w_shape = config.param<double>("dynamic_object_rejection", "w_shape", 0.5);
     w_occupancy = config.param<double>("dynamic_object_rejection", "w_occupancy", 0.3);
+    story_factor = config.param<double>("dynamic_object_rejection", "story_factor", 0.5);
     
     
     //this one must be the same as the one used for odometry estimation to ensure consistency in voxelization
@@ -143,36 +144,40 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
 
     
     
-    // Store all voxelmaps for next frame comparison (no dynamic_cast needed)
+    // Store voxelmap for next frame comparison
     last_voxelmap = voxelmap;
     spdlog::info("[dynamic_rejection] stored voxelmap for next frame");
-    
-    // Create point cloud with all accumulated points
-    gtsam_points::PointCloudCPU::Ptr new_frame = std::make_shared<gtsam_points::PointCloudCPU>();
-    if (!static_points.empty()) {
-        new_frame->add_points(static_points);
-        if (!static_intensities.empty()) {
-            new_frame->add_intensities(static_intensities);
+
+    // If no static points were accumulated, return original frame unfiltered
+    if (static_points.empty()) {
+        spdlog::warn("[dynamic_rejection] no static points accumulated, returning original frame");
+        if (!dynamic_points.empty()) {
+            last_dynamic_frame = std::make_shared<PreprocessedFrame>();
+            last_dynamic_frame->stamp = frame->stamp;
+            last_dynamic_frame->scan_end_time = frame->scan_end_time;
+            last_dynamic_frame->points = std::move(dynamic_points);
+            last_dynamic_frame->intensities = std::move(dynamic_intensities);
+            last_dynamic_frame->times = std::move(dynamic_times);
+            last_dynamic_frame->k_neighbors = 0;
+        } else {
+            last_dynamic_frame = nullptr;
         }
-        if (!static_times.empty()) {
-            new_frame->add_times(static_times);
-        }
+        return frame;
     }
+
+    // Create output frame directly from accumulated static vectors (no PointCloudCPU intermediate)
     PreprocessedFrame::Ptr dynamic_rejection_frame(new PreprocessedFrame);
     dynamic_rejection_frame->stamp = frame->stamp;
     dynamic_rejection_frame->scan_end_time = frame->scan_end_time;
-    if (new_frame->times) {
-        dynamic_rejection_frame->times.assign(new_frame->times, new_frame->times + new_frame->size());
-    }
-    if (new_frame->size() > 0) {
-        dynamic_rejection_frame->points.assign(new_frame->points, new_frame->points + new_frame->size());
-    }
-    if (new_frame->intensities) {
-        dynamic_rejection_frame->intensities.assign(new_frame->intensities, new_frame->intensities + new_frame->size());
-    }
+    dynamic_rejection_frame->points = std::move(static_points);
+    dynamic_rejection_frame->intensities = std::move(static_intensities);
+    dynamic_rejection_frame->times = std::move(static_times);
     dynamic_rejection_frame->k_neighbors = frame->k_neighbors;
-    if (new_frame->size() > 0 && frame->k_neighbors > 0) {
-        dynamic_rejection_frame->neighbors = find_neighbors(new_frame->points, new_frame->size(), frame->k_neighbors);
+    if (frame->k_neighbors > 0) {
+        dynamic_rejection_frame->neighbors = find_neighbors(
+            dynamic_rejection_frame->points.data(),
+            dynamic_rejection_frame->points.size(),
+            frame->k_neighbors);
     }
     spdlog::info("[dynamic_rejection] frame prepared: input_points={} output_points={} dynamic_voxels={} neighbors={}",
                   frame->points.size(),
@@ -185,11 +190,11 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
         last_dynamic_frame = std::make_shared<PreprocessedFrame>();
         last_dynamic_frame->stamp = frame->stamp;
         last_dynamic_frame->scan_end_time = frame->scan_end_time;
-        last_dynamic_frame->points = dynamic_points;
-        last_dynamic_frame->intensities = dynamic_intensities;
-        last_dynamic_frame->times = dynamic_times;
+        last_dynamic_frame->points = std::move(dynamic_points);
+        last_dynamic_frame->intensities = std::move(dynamic_intensities);
+        last_dynamic_frame->times = std::move(dynamic_times);
         last_dynamic_frame->k_neighbors = 0;
-        spdlog::info("[dynamic_rejection] dynamic frame: {} points", dynamic_points.size());
+        spdlog::info("[dynamic_rejection] dynamic frame: {} points", last_dynamic_frame->points.size());
     } else {
         last_dynamic_frame = nullptr;
     }
@@ -205,15 +210,20 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         current_voxelmap->gtsam_points::IncrementalVoxelMap<gtsam_points::DynamicGaussianVoxel>::num_voxels());
     const int prev_nvox = static_cast<int>(
         prev_voxelmap->gtsam_points::IncrementalVoxelMap<gtsam_points::DynamicGaussianVoxel>::num_voxels());
-    const int compare_nvox = std::min(nvox, prev_nvox);
+    const int compare_nvox = nvox;
 
 
     for (int j = 0; j < compare_nvox; j++) {
         auto& current_voxel = current_voxelmap->lookup_voxel(j);
-        auto& prev_voxel = prev_voxelmap->lookup_voxel(j);
-        // auto coord = current_voxelmap->voxel_coord(current_voxel.mean);
-        // int voxel_index = current_voxelmap->lookup_voxel_index(coord);
-        // auto& prev_voxel = prev_voxelmap->lookup_voxel(voxel_index);
+        // auto& prev_voxel = prev_voxelmap->lookup_voxel(j);
+        auto coord = current_voxelmap->voxel_coord(current_voxel.mean);
+        int voxel_index = prev_voxelmap->lookup_voxel_index(coord);
+        if(voxel_index < 0)
+        {
+            current_voxel.is_dynamic = true;
+            continue;
+        }
+        auto& prev_voxel = prev_voxelmap->lookup_voxel(voxel_index);
         
 
         current_voxel.is_dynamic = false; // reset dynamic flag, will be updated by checks below
@@ -305,7 +315,6 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
            6. dynamic score
            --------------------------- */
 
-
         double score = 0.0;
 
         score += params_.w_shift * centroid_shift;
@@ -313,6 +322,7 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         score += params_.w_covariance_difference * cov_norm;
         score += params_.w_shape * shape_change;
         score += params_.w_occupancy * occ_ratio;
+        score += params_.story_factor * (current_voxel.is_dynamic ? 1.0 : -1.0);
 
         spdlog::info("[dynamic_rejection] voxel {} score={} (shift={} mahal={} cov={} shape={} occ={})",j, score, centroid_shift, mahal, cov_norm, shape_change, occ_ratio);
 
