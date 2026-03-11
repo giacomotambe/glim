@@ -35,7 +35,8 @@ DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU() {
     w_covariance_difference = config.param<double>("dynamic_object_rejection", "w_covariance_difference", 0.5);
     w_shape = config.param<double>("dynamic_object_rejection", "w_shape", 0.5);
     w_occupancy = config.param<double>("dynamic_object_rejection", "w_occupancy", 0.3);
-    story_factor = config.param<double>("dynamic_object_rejection", "story_factor", 0.5);
+    history_factor = config.param<double>("dynamic_object_rejection", "history_factor", 0.5);
+    frame_num_memory = config.param<int>("dynamic_object_rejection", "frame_num_memory", 10);
     
     
     //this one must be the same as the one used for odometry estimation to ensure consistency in voxelization
@@ -96,7 +97,7 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
         return nullptr;
     }
 
-    if (!last_voxelmap) {
+    if (last_voxelmaps.empty()) {
         spdlog::info("[dynamic_rejection] dynamic_object_rejection: no last_voxelmap, use current voxelmap for next comparison");
     }
 
@@ -123,12 +124,12 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
     
     // Compare the voxelmaps of the current frame with those of the previous frame to identify dynamic points
     // Use internally stored last_voxelmaps instead of dynamic_cast from prev_frame
-    if (!last_voxelmap) {
+    if (last_voxelmaps.empty()) {
         spdlog::info("[dynamic_rejection] last_voxelmaps empty, skip comparison (first frame)");
         
         // Ritorna frame senza filtro dinamico se è il primo frame
         dynamic_voxels_indices.clear();
-        last_voxelmap = voxelmap;
+        last_voxelmaps.push_back(voxelmap);
         return frame;
     }
         
@@ -140,12 +141,15 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
     dynamic_points.clear();
     dynamic_intensities.clear();
     dynamic_times.clear();
-    auto update_voxelmap = dynamic_object_recognition(voxelmap, last_voxelmap);
+    auto update_voxelmap = dynamic_object_recognition(voxelmap, last_voxelmaps.back());
 
     
     
     // Store voxelmap for next frame comparison
-    last_voxelmap = voxelmap;
+    last_voxelmaps.push_back(voxelmap);
+    if (last_voxelmaps.size() > params_.frame_num_memory) {
+        last_voxelmaps.erase(last_voxelmaps.begin());
+    }
     spdlog::info("[dynamic_rejection] stored voxelmap for next frame");
 
     // If no static points were accumulated, return original frame unfiltered
@@ -322,7 +326,29 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         score += params_.w_covariance_difference * cov_norm;
         score += params_.w_shape * shape_change;
         score += params_.w_occupancy * occ_ratio;
-        score += params_.story_factor * (prev_voxel.is_dynamic ? 1.0 : -1.0);
+        
+        /* Add history factor to boost score if voxel was previously classified as dynamic */
+        for (int k=0; k < params_.frame_num_memory; k++){
+            if(last_voxelmaps.size() > static_cast<size_t>(k))
+            {
+                auto& past_map = last_voxelmaps[last_voxelmaps.size() - 1 - k];
+                int past_voxel_index = past_map->lookup_voxel_index(coord);
+                if(past_voxel_index < 0)
+                    continue;
+                auto& past_voxel = past_map->lookup_voxel(past_voxel_index);
+                spdlog::debug("[dynamic_rejection] voxel {} history k={} is_dynamic={}", j, k, past_voxel.is_dynamic);
+                if(past_voxel.is_dynamic)
+                {
+                    score += std::exp(-k) * params_.history_factor; // decaying boost for recent history
+                }
+                else
+                {
+                    score -= std::exp(-k) * params_.history_factor; // decaying penalty if it was static in the past
+                }
+            }
+        }
+        
+        // score += params_.history_factor * (prev_voxel.is_dynamic ? 1.0 : -1.0);
 
         spdlog::info("[dynamic_rejection] voxel {} score={} (shift={} mahal={} cov={} shape={} occ={})",j, score, centroid_shift, mahal, cov_norm, shape_change, occ_ratio);
 
@@ -418,6 +444,7 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         recursive_level = 1; // reset recursive level for next voxel
         
     }
+    spdlog::info("[dynamic_rejection] dynamic_object_recognition end");
     return current_voxelmap;
 }
 
