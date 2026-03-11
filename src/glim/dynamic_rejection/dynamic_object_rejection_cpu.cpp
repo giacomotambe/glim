@@ -322,7 +322,7 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         score += params_.w_covariance_difference * cov_norm;
         score += params_.w_shape * shape_change;
         score += params_.w_occupancy * occ_ratio;
-        score += params_.story_factor * (current_voxel.is_dynamic ? 1.0 : -1.0);
+        score += params_.story_factor * (prev_voxel.is_dynamic ? 1.0 : -1.0);
 
         spdlog::info("[dynamic_rejection] voxel {} score={} (shift={} mahal={} cov={} shape={} occ={})",j, score, centroid_shift, mahal, cov_norm, shape_change, occ_ratio);
 
