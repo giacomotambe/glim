@@ -127,7 +127,9 @@ void AsyncOdometryEstimation::run() {
       std::vector<EstimationFrame::ConstPtr> marginalized;
       auto state = odometry_estimation->insert_frame(frame, marginalized);
 
-      output_estimation_results.push_back(state);
+      if (state) {
+        output_estimation_results.push_back(state);
+      }
       output_marginalized_frames.insert(marginalized);
       raw_frames.pop_front();
       internal_frame_queue_size = raw_frames.size();

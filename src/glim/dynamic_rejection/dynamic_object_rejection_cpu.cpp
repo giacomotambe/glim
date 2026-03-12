@@ -22,7 +22,7 @@
 
 namespace glim {
 DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU() {
-    spdlog::info("[dynamic_rejection] DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU begin");
+    spdlog::debug("[dynamic_rejection] DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU begin");
     Config config(GlobalConfig::get_config_path("config_dynamic_object_rejection"));
     mean_difference_threshold = config.param<double>("dynamic_object_rejection", "mean_difference_threshold", 0.5);
     covariance_error_threshold = config.param<double>("dynamic_object_rejection", "covariance_error_threshold", 0.5);
@@ -47,14 +47,14 @@ DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU() {
 
 
 DynamicObjectRejectionParamsCPU::~DynamicObjectRejectionParamsCPU() {
-    spdlog::info("[dynamic_rejection] DynamicObjectRejectionParamsCPU::~DynamicObjectRejectionParamsCPU");
+    spdlog::debug("[dynamic_rejection] DynamicObjectRejectionParamsCPU::~DynamicObjectRejectionParamsCPU");
 }
 
 DynamicObjectRejectionCPU::DynamicObjectRejectionCPU(const DynamicObjectRejectionParamsCPU& params)
     : params_(params) {
         dynamic_voxels_indices.clear();
         covariance_estimation.reset(new CloudCovarianceEstimation(params_.num_threads));
-        spdlog::info("[dynamic_rejection] DynamicObjectRejectionCPU::DynamicObjectRejectionCPU");
+        spdlog::debug("[dynamic_rejection] DynamicObjectRejectionCPU::DynamicObjectRejectionCPU");
     }
 
 
@@ -62,7 +62,7 @@ DynamicObjectRejectionCPU::DynamicObjectRejectionCPU(const DynamicObjectRejectio
 std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr> DynamicObjectRejectionCPU::add_odometry(
     const std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr>& voxelmaps,
     const Eigen::Isometry3d& T_world_imu) {
-    spdlog::info("[dynamic_rejection] add_odometry: voxelmaps={} t=({}, {}, {})",
+    spdlog::debug("[dynamic_rejection] add_odometry: voxelmaps={} t=({}, {}, {})",
                   voxelmaps.size(),
                   T_world_imu.translation().x(),
                   T_world_imu.translation().y(),
@@ -91,23 +91,23 @@ std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr> DynamicObjectRejectionCPU::ad
 }
 
 PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const PreprocessedFrame::Ptr frame){
-    spdlog::info("[dynamic_rejection] dynamic_object_rejection begin: frame={}", static_cast<bool>(frame));
+    spdlog::debug("[dynamic_rejection] dynamic_object_rejection begin: frame={}", static_cast<bool>(frame));
     if (!frame) {
         spdlog::warn("[dynamic_rejection] dynamic_object_rejection: null input frame");
         return nullptr;
     }
 
     if (last_voxelmaps.empty()) {
-        spdlog::info("[dynamic_rejection] dynamic_object_rejection: no last_voxelmap, use current voxelmap for next comparison");
+        spdlog::debug("[dynamic_rejection] dynamic_object_rejection: no last_voxelmap, use current voxelmap for next comparison");
     }
 
     std::vector<Eigen::Vector4d> frame_normals;
     std::vector<Eigen::Matrix4d> frame_covs;
     
     
-    spdlog::info("[dynamic_rejection] estimating covariance for {} points", frame->points.size());
+    spdlog::debug("[dynamic_rejection] estimating covariance for {} points", frame->points.size());
     covariance_estimation->estimate(frame->points, frame->neighbors, frame_normals, frame_covs);
-    spdlog::info("[dynamic_rejection] covariance estimation done: normals={} covs={}", frame_normals.size(), frame_covs.size());
+    spdlog::debug("[dynamic_rejection] covariance estimation done: normals={} covs={}", frame_normals.size(), frame_covs.size());
     //build a point cloud from the preprocessed frame to insert into the voxelmap
     
     auto point_cloud = std::make_shared<gtsam_points::PointCloudCPU>(frame->points);
@@ -125,7 +125,7 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
     // Compare the voxelmaps of the current frame with those of the previous frame to identify dynamic points
     // Use internally stored last_voxelmaps instead of dynamic_cast from prev_frame
     if (last_voxelmaps.empty()) {
-        spdlog::info("[dynamic_rejection] last_voxelmaps empty, skip comparison (first frame)");
+        spdlog::debug("[dynamic_rejection] last_voxelmaps empty, skip comparison (first frame)");
         
         // Ritorna frame senza filtro dinamico se è il primo frame
         dynamic_voxels_indices.clear();
@@ -150,7 +150,7 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
     if (last_voxelmaps.size() > params_.frame_num_memory) {
         last_voxelmaps.erase(last_voxelmaps.begin());
     }
-    spdlog::info("[dynamic_rejection] stored voxelmap for next frame");
+    spdlog::debug("[dynamic_rejection] stored voxelmap for next frame");
 
     // If no static points were accumulated, return original frame unfiltered
     if (static_points.empty()) {
@@ -183,7 +183,7 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
             dynamic_rejection_frame->points.size(),
             frame->k_neighbors);
     }
-    spdlog::info("[dynamic_rejection] frame prepared: input_points={} output_points={} dynamic_voxels={} neighbors={}",
+    spdlog::debug("[dynamic_rejection] frame prepared: input_points={} output_points={} dynamic_voxels={} neighbors={}",
                   frame->points.size(),
                   dynamic_rejection_frame->points.size(),
                   dynamic_voxels_indices.size(),
@@ -198,7 +198,7 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
         last_dynamic_frame->intensities = std::move(dynamic_intensities);
         last_dynamic_frame->times = std::move(dynamic_times);
         last_dynamic_frame->k_neighbors = 0;
-        spdlog::info("[dynamic_rejection] dynamic frame: {} points", last_dynamic_frame->points.size());
+        spdlog::debug("[dynamic_rejection] dynamic frame: {} points", last_dynamic_frame->points.size());
     } else {
         last_dynamic_frame = nullptr;
     }
@@ -350,12 +350,12 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         
         // score += params_.history_factor * (prev_voxel.is_dynamic ? 1.0 : -1.0);
 
-        spdlog::info("[dynamic_rejection] voxel {} score={} (shift={} mahal={} cov={} shape={} occ={})",j, score, centroid_shift, mahal, cov_norm, shape_change, occ_ratio);
+        spdlog::debug("[dynamic_rejection] voxel {} score={} (shift={} mahal={} cov={} shape={} occ={})",j, score, centroid_shift, mahal, cov_norm, shape_change, occ_ratio);
 
         if(score > params_.dynamic_score_threshold)
         {
             current_voxel.is_dynamic = true;
-            spdlog::info("[dynamic_rejection] voxel {} classified as DYNAMIC", j);
+            spdlog::debug("[dynamic_rejection] voxel {} classified as DYNAMIC", j);
         }
         else
         {
@@ -444,16 +444,16 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         recursive_level = 1; // reset recursive level for next voxel
         
     }
-    spdlog::info("[dynamic_rejection] dynamic_object_recognition end");
+    spdlog::debug("[dynamic_rejection] dynamic_object_recognition end");
     return current_voxelmap;
 }
 
 
 
 std::vector<int> DynamicObjectRejectionCPU::find_neighbors(const Eigen::Vector4d* points, const int num_points, const int k) const {
-    spdlog::info("[dynamic_rejection] find_neighbors begin: points_ptr={} num_points={} k={}", static_cast<const void*>(points), num_points, k);
+    spdlog::debug("[dynamic_rejection] find_neighbors begin: points_ptr={} num_points={} k={}", static_cast<const void*>(points), num_points, k);
     if (!points || num_points <= 0 || k <= 0) {
-        spdlog::info("[dynamic_rejection] find_neighbors bypass: invalid input");
+        spdlog::debug("[dynamic_rejection] find_neighbors bypass: invalid input");
         return {};
     }
 
@@ -486,7 +486,7 @@ std::vector<int> DynamicObjectRejectionCPU::find_neighbors(const Eigen::Vector4d
 #endif
   }
 
-    spdlog::info("[dynamic_rejection] find_neighbors end: neighbors={}", neighbors.size());
+    spdlog::debug("[dynamic_rejection] find_neighbors end: neighbors={}", neighbors.size());
     return neighbors;
 }
 

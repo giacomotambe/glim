@@ -57,7 +57,7 @@ const DynamicGaussianVoxel& DynamicVoxelMapCPU::lookup_voxel(int voxel_id) const
 }
 
 void DynamicVoxelMapCPU::insert(const PointCloud& frame) {
-    spdlog::info("[DynamicVoxelMapCPU::insert] Inserting frame with {} points", frame.size());
+    spdlog::debug("[DynamicVoxelMapCPU::insert] Inserting frame with {} points", frame.size());
     
     if (frame.size() == 0) {
         spdlog::warn("[DynamicVoxelMapCPU::insert] Frame has 0 points, skipping insert");
@@ -66,7 +66,7 @@ void DynamicVoxelMapCPU::insert(const PointCloud& frame) {
     
     IncrementalVoxelMap<DynamicGaussianVoxel>::insert(frame);
     
-    spdlog::info("[DynamicVoxelMapCPU::insert] Frame inserted, initializing {} voxels", num_voxels());
+    spdlog::debug("[DynamicVoxelMapCPU::insert] Frame inserted, initializing {} voxels", num_voxels());
     
     for (int i = 0; i < num_voxels(); i++) {
         auto& voxel = flat_voxels[i]->second;
@@ -87,7 +87,7 @@ void DynamicVoxelMapCPU::insert(const PointCloud& frame) {
     
     }
     
-    spdlog::info("[DynamicVoxelMapCPU::insert] All voxels initialized");
+    spdlog::debug("[DynamicVoxelMapCPU::insert] All voxels initialized");
 }
 
 

@@ -106,6 +106,7 @@ add_library(glim SHARED
   $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/dynamic_object_rejection_cpu.cpp>
   $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/dynamic_voxelmap_cpu.cpp>
   $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/async_dynamic_object_rejection_cpu.cpp>
+  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/transformation_kalman_filter.cpp>
   # GPU-related
   ${GPU_SRCS}
 )
@@ -204,15 +205,7 @@ if(BUILD_WITH_VIEWER)
     glim
   )
 
-  # Dynamic rejection viewer
-  add_library(dynamic_rejection_viewer SHARED
-    src/glim/viewer/dynamic_rejection_viewer.cpp
-  )
-  target_link_libraries(dynamic_rejection_viewer
-    glim
-  )
-
-  list(APPEND glim_LIBRARIES standard_viewer interactive_viewer memory_monitor map_editor dynamic_rejection_viewer)
+  list(APPEND glim_LIBRARIES standard_viewer interactive_viewer memory_monitor map_editor)
 endif()
 
 #############
