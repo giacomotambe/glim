@@ -56,6 +56,7 @@ DynamicObjectRejectionCPU::DynamicObjectRejectionCPU(const DynamicObjectRejectio
                                                      const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter)
     : params_(params), pose_kalman_filter(pose_kalman_filter) {
         dynamic_voxels_indices.clear();
+        dynamic_voxels_neighbor_indices.clear();
         covariance_estimation.reset(new CloudCovarianceEstimation(params_.num_threads));
         if (!this->pose_kalman_filter) {
             this->pose_kalman_filter = std::make_shared<PoseKalmanFilter>();
@@ -277,6 +278,7 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         }
         auto& prev_voxel = prev_voxelmap->lookup_voxel(voxel_index);
 
+        // Compare voxel properties (mean, covariance, number of points) to classify as dynamic or static
         current_voxel.is_dynamic = false; // reset dynamic flag, will be updated by checks below
         if(prev_voxel.is_dynamic)
             current_voxel.dynamic_score=prev_voxel.dynamic_score*exp(-1.0);
@@ -296,16 +298,16 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         double mean_dist = delta.norm();
 
         /* ---------------------------
-           1. centroid shift
-           --------------------------- */
+            1. centroid shift
+            --------------------------- */
 
         double centroid_shift = mean_dist / current_voxelmap->voxel_resolution(); // normalize by voxel size to get a more scale-invariant measure
 
         spdlog::debug("[dynamic_rejection] voxel {} centroid_shift={}", j, centroid_shift);
 
         /* ---------------------------
-           2. Mahalanobis distance
-           --------------------------- */
+            2. Mahalanobis distance
+            --------------------------- */
 
         Eigen::Matrix3d cov =current_voxel.cov.topLeftCorner<3,3>() + prev_voxel.cov.topLeftCorner<3,3>();
 
@@ -332,8 +334,8 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         spdlog::debug("[dynamic_rejection] voxel {} mahalanobis={}", j, mahal);
 
         /* ---------------------------
-           3. covariance difference
-           --------------------------- */
+            3. covariance difference
+            --------------------------- */
 
         double cov_norm =
             (current_voxel.cov - prev_voxel.cov).norm() /
@@ -342,8 +344,8 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         spdlog::debug("[dynamic_rejection] voxel {} covariance_change={}", j, cov_norm);
 
         /* ---------------------------
-           4. shape change
-           --------------------------- */
+            4. shape change
+            --------------------------- */
 
         double shape_change = 0.0;
 
@@ -352,7 +354,7 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eig_curr(current_voxel.cov.topLeftCorner<3,3>());
 
         if(eig_prev.info() == Eigen::Success &&
-           eig_curr.info() == Eigen::Success)
+            eig_curr.info() == Eigen::Success)
         {
             Eigen::Vector3d l_prev = eig_prev.eigenvalues();
             Eigen::Vector3d l_curr = eig_curr.eigenvalues();
@@ -362,16 +364,16 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         spdlog::debug("[dynamic_rejection] voxel {} shape_change={}", j, shape_change);
 
         /* ---------------------------
-           5. occupancy ratio
-           --------------------------- */
+            5. occupancy ratio
+            --------------------------- */
 
         double occ_ratio = std::abs((double)current_voxel.num_points - (double)prev_voxel.num_points) / (current_voxel.num_points + prev_voxel.num_points + 1e-6);
 
         spdlog::debug("[dynamic_rejection] voxel {} occupancy_ratio={}", j, occ_ratio);
 
         /* ---------------------------
-           6. dynamic score
-           --------------------------- */
+            6. dynamic score
+            --------------------------- */
 
 
         current_voxel.dynamic_score += params_.w_shift * centroid_shift;
@@ -381,10 +383,12 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         current_voxel.dynamic_score += params_.w_occupancy * occ_ratio;
         
         /* Add history factor to boost score if voxel was previously classified as dynamic */
+        
         for (int k=0; k < params_.frame_num_memory; k++){
             if(last_voxelmaps.size() > static_cast<size_t>(k))
             {
                 auto& past_map = last_voxelmaps[last_voxelmaps.size() - 1 - k];
+            
                 int past_voxel_index = past_map->lookup_voxel_index(coord);
                 if(past_voxel_index < 0)
                     continue;
@@ -416,19 +420,9 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
             spdlog::info("[dynamic_rejection] voxel {} classified as STATIC", j);
         }
 
-        for (int neighbor_idx : get_neighbor_voxels(prev_voxelmap, current_voxel.mean)) {
-            auto& neighbor_voxel = prev_voxelmap->lookup_voxel(neighbor_idx);
-            if(current_voxel.is_dynamic)
-            {
-                neighbor_voxel.dynamic_score += params_.w_neighbor;
-                spdlog::debug("[dynamic_rejection] voxel {} neighbor voxel {} is dynamic, increasing score to {}", j, neighbor_idx, current_voxel.dynamic_score);
-            }
-            else
-            {
-                neighbor_voxel.dynamic_score -= params_.w_neighbor;
-                spdlog::debug("[dynamic_rejection] voxel {} neighbor voxel {} is static, decreasing score to {}", j, neighbor_idx, current_voxel.dynamic_score);
-            }
-        }
+        auto neighbor_indices = get_neighbor_voxels(current_voxelmap, current_voxel.mean);
+        dynamic_voxels_neighbor_indices.insert(dynamic_voxels_neighbor_indices.end(), neighbor_indices.begin(), neighbor_indices.end());
+            
         
         // if(recursive_level < params_.voxelmap_levels && current_voxel.is_dynamic) {
         //     current_voxel.finest_voxelmap=std::make_shared<gtsam_points::DynamicVoxelMapCPU>(current_voxelmap->voxel_resolution()*params_.voxelmap_scaling_factor);
@@ -438,8 +432,26 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         //     prev_voxel.finest_voxelmap->insert(*prev_voxel.voxel_point_cloud);
         //     recursive_level++;
         //     dynamic_object_recognition(current_voxel.finest_voxelmap, prev_voxel.finest_voxelmap);
-        // }  
-        if(!current_voxel.is_dynamic){
+        // }
+
+        //recursive_level = 1; // reset recursive level for next voxel
+    }
+    
+    for(auto idx : dynamic_voxels_neighbor_indices) {
+        if(idx < 0 || idx >= prev_nvox)
+            continue;
+
+        auto& neighbor_voxel = prev_voxelmap->lookup_voxel(idx);
+        if(neighbor_voxel.is_dynamic)
+            neighbor_voxel.dynamic_score += params_.w_neighbor;
+            if(neighbor_voxel.dynamic_score > params_.dynamic_score_threshold)
+                neighbor_voxel.is_dynamic = true;   
+    }
+    
+    
+    for (int j = 0; j < compare_nvox; j++) {
+        auto& current_voxel = current_voxelmap->lookup_voxel(j);
+         if(!current_voxel.is_dynamic){
             // accumulate static points for output frame
             static_points.insert(static_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
             static_intensities.insert(static_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
@@ -450,15 +462,11 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
             dynamic_intensities.insert(dynamic_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
             dynamic_times.insert(dynamic_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
         }
-
-        
-        recursive_level = 1; // reset recursive level for next voxel
-        
     }
+
     spdlog::debug("[dynamic_rejection] dynamic_object_recognition end");
     return current_voxelmap;
 }
-
 
 
 std::vector<int> DynamicObjectRejectionCPU::find_neighbors(const Eigen::Vector4d* points, const int num_points, const int k) const {

@@ -72,6 +72,8 @@ private:
 
   std::vector<int> get_neighbor_voxels(gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap, const Eigen::Vector4d& mean);
 
+  void compare_voxels(gtsam_points::DynamicGaussianVoxel& current_voxel, const gtsam_points::DynamicGaussianVoxel& prev_voxel);
+
   /**
      * @brief Recognize dynamic objects in the current frame by comparing it with the previous frame and return a new estimation frame without points classified as dynamic.
      * @param frame Current preprocessed frame
@@ -97,7 +99,7 @@ private:
 
   
     int recursive_level; // to keep track of the current level of recursion in the voxelmap hierarchy
-    std::vector<int> neighbor_list;
+    std::vector<int> dynamic_voxels_neighbor_indices; // to store the indices of neighboring voxels for each dynamic voxel, used for boosting the dynamic score of neighboring voxels
     std::unique_ptr<CloudCovarianceEstimation> covariance_estimation;
     std::shared_ptr<PoseKalmanFilter> pose_kalman_filter; // for fusing IMU and SLAM pose estimates to get a more accurate odometry estimation
 
