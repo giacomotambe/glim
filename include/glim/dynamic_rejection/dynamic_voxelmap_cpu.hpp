@@ -18,7 +18,7 @@ struct DynamicGaussianVoxel : public gtsam_points::GaussianVoxel
         using Ptr = std::shared_ptr<DynamicGaussianVoxel>;
         using ConstPtr = std::shared_ptr<const DynamicGaussianVoxel>;
 
-        DynamicGaussianVoxel() : gtsam_points::GaussianVoxel(), is_dynamic(false), voxel_point_cloud(nullptr), finest_voxelmap(nullptr) {}
+        DynamicGaussianVoxel() : gtsam_points::GaussianVoxel(), is_dynamic(false), voxel_point_cloud(nullptr), finest_voxelmap(nullptr), dynamic_score(0.0) {}
     public:
         bool is_dynamic;
         std::vector<Eigen::Vector4d> voxel_points; 
@@ -26,6 +26,7 @@ struct DynamicGaussianVoxel : public gtsam_points::GaussianVoxel
         std::vector<double> voxel_times;
         PointCloudCPU::Ptr voxel_point_cloud; // store the history of this voxel for dynamic classification
         std::shared_ptr<DynamicVoxelMapCPU> finest_voxelmap; // store the history of this voxel for dynamic classification
+        double dynamic_score; // store the dynamic score for this voxel
 
 
         // override must use fully qualified Setting type
@@ -69,6 +70,9 @@ class DynamicVoxelMapCPU : public gtsam_points::GaussianVoxelMap , public gtsam_
 
         /// @brief  Insert a point cloud frame into the voxelmap.
         virtual void insert(const gtsam_points::PointCloud& frame) override;
+
+        /// @brief Extract all individual points from all voxels (not just means)
+        gtsam_points::PointCloudCPU::Ptr all_points_data() const;
 
         /// @brief Save the voxelmap to a compact binary format
         virtual void save_compact(const std::string& path) const override;

@@ -106,7 +106,7 @@ add_library(glim SHARED
   $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/dynamic_object_rejection_cpu.cpp>
   $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/dynamic_voxelmap_cpu.cpp>
   $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/async_dynamic_object_rejection_cpu.cpp>
-  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/transformation_kalman_filter.cpp>
+  src/glim/dynamic_rejection/transformation_kalman_filter.cpp
   # GPU-related
   ${GPU_SRCS}
 )

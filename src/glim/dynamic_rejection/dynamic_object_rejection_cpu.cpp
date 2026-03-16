@@ -7,6 +7,7 @@
 #include <glim/dynamic_rejection/dynamic_object_rejection_cpu.hpp>
 #include <glim/preprocess/cloud_preprocessor.hpp>
 #include <glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp>
+#include <glim/dynamic_rejection/transformation_kalman_filter.hpp>
 #include <glim/util/config.hpp>
 
 #include <gtsam_points/types/point_cloud_cpu.hpp>
@@ -35,6 +36,7 @@ DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU() {
     w_covariance_difference = config.param<double>("dynamic_object_rejection", "w_covariance_difference", 0.5);
     w_shape = config.param<double>("dynamic_object_rejection", "w_shape", 0.5);
     w_occupancy = config.param<double>("dynamic_object_rejection", "w_occupancy", 0.3);
+    w_neighbor = config.param<double>("dynamic_object_rejection", "w_neighbor", 0.6);
     history_factor = config.param<double>("dynamic_object_rejection", "history_factor", 0.5);
     frame_num_memory = config.param<int>("dynamic_object_rejection", "frame_num_memory", 10);
     
@@ -50,44 +52,83 @@ DynamicObjectRejectionParamsCPU::~DynamicObjectRejectionParamsCPU() {
     spdlog::debug("[dynamic_rejection] DynamicObjectRejectionParamsCPU::~DynamicObjectRejectionParamsCPU");
 }
 
-DynamicObjectRejectionCPU::DynamicObjectRejectionCPU(const DynamicObjectRejectionParamsCPU& params)
-    : params_(params) {
+DynamicObjectRejectionCPU::DynamicObjectRejectionCPU(const DynamicObjectRejectionParamsCPU& params,
+                                                     const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter)
+    : params_(params), pose_kalman_filter(pose_kalman_filter) {
         dynamic_voxels_indices.clear();
         covariance_estimation.reset(new CloudCovarianceEstimation(params_.num_threads));
+        if (!this->pose_kalman_filter) {
+            this->pose_kalman_filter = std::make_shared<PoseKalmanFilter>();
+        }
         spdlog::debug("[dynamic_rejection] DynamicObjectRejectionCPU::DynamicObjectRejectionCPU");
     }
 
 
 
-std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr> DynamicObjectRejectionCPU::add_odometry(
-    const std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr>& voxelmaps,
-    const Eigen::Isometry3d& T_world_imu) {
+void DynamicObjectRejectionCPU::add_odometry(
+    std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr>& voxelmaps,
+    const Eigen::Isometry3d& T_relative) {
     spdlog::debug("[dynamic_rejection] add_odometry: voxelmaps={} t=({}, {}, {})",
                   voxelmaps.size(),
-                  T_world_imu.translation().x(),
-                  T_world_imu.translation().y(),
-                  T_world_imu.translation().z());
-    // std::vector<DynamicVoxelMapCPU::Ptr> updated_voxelmaps;
-    // for (const auto& voxelmap : voxelmaps) {
-    //     // create new map of same type/resolution
-    //     auto updated_voxelmap = std::make_shared<DynamicVoxelMapCPU>(voxelmap->voxel_resolution());
-    //     for (int i = 0; i < voxelmap->num_voxels(); i++) {
-    //         auto& voxel = voxelmap->lookup_voxel(i);
-    //         Eigen::Vector4d transformed_mean = T_world_imu * Eigen::Vector4d(voxel.mean.x(), voxel.mean.y(), voxel.mean.z(), 1.0);
-    //         // Transform the covariance matrix correctly
-    //         Eigen::Matrix3d R = T_world_imu.rotation();
-    //         Eigen::Matrix3d transformed_cov = R * voxel.cov * R.transpose();
-    //         DynamicGaussianVoxel transformed_voxel;
-    //         transformed_voxel.mean = transformed_mean.head<3>();
-    //         transformed_voxel.cov = transformed_cov;
-    //         transformed_voxel.num_points = voxel.num_points;
-    //         transformed_voxel.is_dynamic = voxel.is_dynamic;
-    //         updated_voxelmap->add_voxel(transformed_voxel);
-    //     }
-    //     updated_voxelmaps.push_back(updated_voxelmap);
-    // }
-    // return updated_voxelmaps;
-    return voxelmaps; // for now we skip the actual transformation for simplicity; in a real implementation we would need to transform each voxel according to the estimated pose
+                  T_relative.translation().x(),
+                  T_relative.translation().y(),
+                  T_relative.translation().z());
+    for (auto& voxelmap : voxelmaps) {
+        auto voxelmap_point_cloud = voxelmap->all_points_data();
+        spdlog::debug("[dynamic_rejection] add_odometry: voxelmap all points size={}", voxelmap_point_cloud->size());
+        auto transformed_pc = gtsam_points::transform(voxelmap_point_cloud, T_relative);
+        auto updated_voxelmap = std::make_shared<gtsam_points::DynamicVoxelMapCPU>(params_.voxel_resolution);
+        updated_voxelmap->insert(*transformed_pc);
+        const int nvox =voxelmap->gtsam_points::IncrementalVoxelMap<gtsam_points::DynamicGaussianVoxel>::num_voxels();
+        for (int j = 0; j < nvox; j++) {
+            auto& old_voxel = voxelmap->lookup_voxel(j);
+
+            if (!old_voxel.is_dynamic)
+                continue;
+
+            Eigen::Vector3d transformed_mean = T_relative.rotation() * old_voxel.mean.head<3>() + T_relative.translation();
+
+            Eigen::Vector4d transformed_mean4;
+            transformed_mean4 << transformed_mean, 1.0;
+            auto coord = updated_voxelmap->voxel_coord(transformed_mean4);
+            int new_index = updated_voxelmap->lookup_voxel_index(coord);
+
+            if (new_index >= 0) {
+                updated_voxelmap->lookup_voxel(new_index).is_dynamic = true;
+            }
+        }
+        spdlog::debug("[dynamic_rejection] add_odometry: updated voxelmap with odometry, num_voxels={}", nvox);
+        voxelmap = updated_voxelmap;
+    }
+}
+
+std::vector<int> DynamicObjectRejectionCPU::get_neighbor_voxels(
+    gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap,
+    const Eigen::Vector4d& mean)
+{
+    std::vector<int> neighbors;
+
+    auto coord = voxelmap->voxel_coord(mean);
+
+    for(int dx=-1; dx<=1; dx++)
+    for(int dy=-1; dy<=1; dy++)
+    for(int dz=-1; dz<=1; dz++)
+    {
+        if(dx==0 && dy==0 && dz==0)
+            continue;
+
+        auto c = coord;
+        c.x() += dx;
+        c.y() += dy;
+        c.z() += dz;
+
+        int idx = voxelmap->lookup_voxel_index(c);
+
+        if(idx >= 0)
+            neighbors.push_back(idx);
+    }
+
+    return neighbors;
 }
 
 PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const PreprocessedFrame::Ptr frame){
@@ -132,6 +173,8 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
         last_voxelmaps.push_back(voxelmap);
         return frame;
     }
+
+    //add_odometry(last_voxelmaps, pose_kalman_filter->getDeltaPose()); // for now we skip the actual transformation for simplicity; in a real implementation we would need to transform each voxel according to the estimated pose
         
     recursive_level = 1; // reset recursive level for new frame
     dynamic_voxels_indices.clear();
@@ -222,19 +265,30 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         // auto& prev_voxel = prev_voxelmap->lookup_voxel(j);
         auto coord = current_voxelmap->voxel_coord(current_voxel.mean);
         int voxel_index = prev_voxelmap->lookup_voxel_index(coord);
+        
         if(voxel_index < 0)
         {
-            current_voxel.is_dynamic = true;
+            // Voxel doesn't exist in previous frame → new part of environment → treat as static
+            current_voxel.is_dynamic = false;
+            static_points.insert(static_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
+            static_intensities.insert(static_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
+            static_times.insert(static_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
             continue;
         }
         auto& prev_voxel = prev_voxelmap->lookup_voxel(voxel_index);
-        
 
         current_voxel.is_dynamic = false; // reset dynamic flag, will be updated by checks below
-
+        if(prev_voxel.is_dynamic)
+            current_voxel.dynamic_score=prev_voxel.dynamic_score*exp(-1.0);
+        else 
+            current_voxel.dynamic_score=0;
         if(current_voxel.num_points < 20 || prev_voxel.num_points < 20)
         {
-            spdlog::debug("[dynamic_rejection] voxel {} skipped (too few points: curr={} prev={})",j, current_voxel.num_points, prev_voxel.num_points);
+            // Too few points to reliably compare → treat as static
+            spdlog::debug("[dynamic_rejection] voxel {} too few points (curr={} prev={}), treating as static",j, current_voxel.num_points, prev_voxel.num_points);
+            static_points.insert(static_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
+            static_intensities.insert(static_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
+            static_times.insert(static_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
             continue;
         }
 
@@ -319,13 +373,12 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
            6. dynamic score
            --------------------------- */
 
-        double score = 0.0;
 
-        score += params_.w_shift * centroid_shift;
-        score += params_.w_mahalanobis * mahal;
-        score += params_.w_covariance_difference * cov_norm;
-        score += params_.w_shape * shape_change;
-        score += params_.w_occupancy * occ_ratio;
+        current_voxel.dynamic_score += params_.w_shift * centroid_shift;
+        current_voxel.dynamic_score += params_.w_mahalanobis * mahal;
+        current_voxel.dynamic_score += params_.w_covariance_difference * cov_norm;
+        current_voxel.dynamic_score += params_.w_shape * shape_change;
+        current_voxel.dynamic_score += params_.w_occupancy * occ_ratio;
         
         /* Add history factor to boost score if voxel was previously classified as dynamic */
         for (int k=0; k < params_.frame_num_memory; k++){
@@ -339,87 +392,43 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
                 spdlog::debug("[dynamic_rejection] voxel {} history k={} is_dynamic={}", j, k, past_voxel.is_dynamic);
                 if(past_voxel.is_dynamic)
                 {
-                    score += std::exp(-k) * params_.history_factor; // decaying boost for recent history
+                    //current_voxel.dynamic_score += std::exp(-k) * params_.history_factor; // decaying boost for recent history
                 }
                 else
                 {
-                    score -= std::exp(-k) * params_.history_factor; // decaying penalty if it was static in the past
+                    current_voxel.dynamic_score -= std::exp(-k) * params_.history_factor; // decaying penalty if it was static in the past
                 }
             }
         }
         
-        // score += params_.history_factor * (prev_voxel.is_dynamic ? 1.0 : -1.0);
+        // current_voxel.dynamic_score += params_.history_factor * (prev_voxel.is_dynamic ? 1.0 : -1.0);
 
-        spdlog::debug("[dynamic_rejection] voxel {} score={} (shift={} mahal={} cov={} shape={} occ={})",j, score, centroid_shift, mahal, cov_norm, shape_change, occ_ratio);
+        spdlog::info("[dynamic_rejection] voxel {} score={} (shift={} mahal={} cov={} shape={} occ={})",j, current_voxel.dynamic_score, centroid_shift, mahal, cov_norm, shape_change, occ_ratio);
 
-        if(score > params_.dynamic_score_threshold)
+        if(current_voxel.dynamic_score > params_.dynamic_score_threshold)
         {
             current_voxel.is_dynamic = true;
-            spdlog::debug("[dynamic_rejection] voxel {} classified as DYNAMIC", j);
+            
+            spdlog::info("[dynamic_rejection] voxel {} classified as DYNAMIC", j);
         }
         else
         {
-            spdlog::debug("[dynamic_rejection] voxel {} classified as STATIC", j);
+            spdlog::info("[dynamic_rejection] voxel {} classified as STATIC", j);
         }
 
-
-
-
-
-
-        // Compare mean of the current voxel with the previous voxel to determine if it's dynamic
-        // double mean_diff = (current_voxel.mean - prev_voxel.mean).norm();
-        // if (mean_diff > params_.mean_difference_threshold) {
-        //     current_voxel.is_dynamic = true;
-        // }
-
-        // // Compare covariance of the current voxel with the previous voxel to determine if it's dynamic
-        // double cov_diff = (current_voxel.cov - prev_voxel.cov).norm();
-        // if (cov_diff > params_.covariance_error_threshold) {
-        //     current_voxel.is_dynamic = true;    
-        // }
-
-
-
-        // // Mahalanobis distance check (robust to singular/invalid covariance)
-        // double mahalanobis_dist = 0.0;
-        // bool mahalanobis_valid = false;
-        // const Eigen::Vector3d mean_delta3 = (current_voxel.mean - prev_voxel.mean).head<3>();
-        // Eigen::Matrix3d cov3 = prev_voxel.cov.topLeftCorner<3, 3>();
-
-        // if (mean_delta3.allFinite() && cov3.allFinite()) {
-        //     cov3 = 0.5 * (cov3 + cov3.transpose());
-        //     cov3.diagonal().array() += 1e-6;
-
-        //     const Eigen::LDLT<Eigen::Matrix3d> ldlt(cov3);
-        //     if (ldlt.info() == Eigen::Success && ldlt.isPositive()) {
-        //         const Eigen::Vector3d solved = ldlt.solve(mean_delta3);
-        //         if (solved.allFinite()) {
-        //             const double quad = mean_delta3.dot(solved);
-        //             if (std::isfinite(quad) && quad >= 0.0) {
-        //                 mahalanobis_dist = std::sqrt(quad);
-        //                 mahalanobis_valid = std::isfinite(mahalanobis_dist);
-        //             }
-        //         }
-        //     }
-        // }
-
-        
-
-        // if (mahalanobis_dist > params_.mahalanobis_distance_threshold) {
-        //     current_voxel.is_dynamic = true;
-        // }
-
-
-        // // Check if the number of points in the current voxel is significantly different from the previous voxel
-        // if(current_voxel.num_points > 50 && prev_voxel.num_points > 50) {
-        //     long long curr_num = static_cast<long long>(current_voxel.num_points);
-        //     long long prev_num = static_cast<long long>(prev_voxel.num_points);
-        //     double points_diff_percent = 100.0 * std::abs(curr_num - prev_num) / static_cast<double>(prev_num);
-        //     if (points_diff_percent > params_.points_number_difference_threshold) {
-        //         current_voxel.is_dynamic = true;  
-        //     }
-        // } 
+        for (int neighbor_idx : get_neighbor_voxels(prev_voxelmap, current_voxel.mean)) {
+            auto& neighbor_voxel = prev_voxelmap->lookup_voxel(neighbor_idx);
+            if(current_voxel.is_dynamic)
+            {
+                neighbor_voxel.dynamic_score += params_.w_neighbor;
+                spdlog::debug("[dynamic_rejection] voxel {} neighbor voxel {} is dynamic, increasing score to {}", j, neighbor_idx, current_voxel.dynamic_score);
+            }
+            else
+            {
+                neighbor_voxel.dynamic_score -= params_.w_neighbor;
+                spdlog::debug("[dynamic_rejection] voxel {} neighbor voxel {} is static, decreasing score to {}", j, neighbor_idx, current_voxel.dynamic_score);
+            }
+        }
         
         // if(recursive_level < params_.voxelmap_levels && current_voxel.is_dynamic) {
         //     current_voxel.finest_voxelmap=std::make_shared<gtsam_points::DynamicVoxelMapCPU>(current_voxelmap->voxel_resolution()*params_.voxelmap_scaling_factor);
@@ -441,6 +450,8 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
             dynamic_intensities.insert(dynamic_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
             dynamic_times.insert(dynamic_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
         }
+
+        
         recursive_level = 1; // reset recursive level for next voxel
         
     }

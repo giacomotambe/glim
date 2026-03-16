@@ -5,6 +5,7 @@
 #include <gtsam_points/types/gaussian_voxelmap.hpp>
 #include <glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp>
 #include <glim/common/cloud_covariance_estimation.hpp>
+#include <glim/dynamic_rejection/transformation_kalman_filter.hpp>
 
 
 
@@ -28,9 +29,11 @@ struct DynamicObjectRejectionParamsCPU {
         double w_mahalanobis;
         double w_covariance_difference;
         double w_shape;
+        double w_neighbor;
         double w_occupancy;
         double history_factor;
         int frame_num_memory;
+
 
 };
 
@@ -41,7 +44,7 @@ public:
     /**
      * @brief Constructor
      */
-  DynamicObjectRejectionCPU(const DynamicObjectRejectionParamsCPU& params = DynamicObjectRejectionParamsCPU());
+  DynamicObjectRejectionCPU(const DynamicObjectRejectionParamsCPU& params=DynamicObjectRejectionParamsCPU(), const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter=nullptr);
 
 
     /**
@@ -62,10 +65,12 @@ public:
   PreprocessedFrame::Ptr get_last_dynamic_frame() const { return last_dynamic_frame; }
 private:
 
-  // Add odometry information to the voxelmaps (e.g., by transforming them according to the estimated pose) and return the updated voxelmaps
-  std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr> add_odometry(const std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr>& voxelmaps, const Eigen::Isometry3d& T_world_imu);
+  // Add odometry information to the voxelmaps (e.g., by transforming them according to the estimated pose) and replace each element in-place
+  void add_odometry(std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr>& voxelmaps, const Eigen::Isometry3d& T_world_imu);
 
   std::vector<int> find_neighbors(const Eigen::Vector4d* points, const int num_points, const int k) const;
+
+  std::vector<int> get_neighbor_voxels(gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap, const Eigen::Vector4d& mean);
 
   /**
      * @brief Recognize dynamic objects in the current frame by comparing it with the previous frame and return a new estimation frame without points classified as dynamic.
@@ -90,8 +95,11 @@ private:
 
     PreprocessedFrame::Ptr last_dynamic_frame;  ///< Last frame of dynamic-only points
 
-    int recursive_level; // to keep track of the current level of recursion in the voxelmap hierarchy 
+  
+    int recursive_level; // to keep track of the current level of recursion in the voxelmap hierarchy
+    std::vector<int> neighbor_list;
     std::unique_ptr<CloudCovarianceEstimation> covariance_estimation;
+    std::shared_ptr<PoseKalmanFilter> pose_kalman_filter; // for fusing IMU and SLAM pose estimates to get a more accurate odometry estimation
 
 };
 

@@ -71,6 +71,7 @@ void DynamicVoxelMapCPU::insert(const PointCloud& frame) {
     for (int i = 0; i < num_voxels(); i++) {
         auto& voxel = flat_voxels[i]->second;
         voxel.is_dynamic = false; // initialize as static, will be updated later in the dynamic object rejection process
+        voxel.dynamic_score = 0.0; // initialize dynamic score
         voxel.voxel_point_cloud = std::make_shared<PointCloudCPU>();
         
         if (!voxel.voxel_points.empty()) {
@@ -90,6 +91,55 @@ void DynamicVoxelMapCPU::insert(const PointCloud& frame) {
     spdlog::debug("[DynamicVoxelMapCPU::insert] All voxels initialized");
 }
 
+
+PointCloudCPU::Ptr DynamicVoxelMapCPU::all_points_data() const {
+    auto frame = std::make_shared<PointCloudCPU>();
+
+    // Count total points for reservation
+    size_t total = 0;
+    for (int i = 0; i < num_voxels(); i++) {
+        total += flat_voxels[i]->second.voxel_points.size();
+    }
+
+    frame->points_storage.reserve(total);
+    std::vector<double> intensities_tmp;
+    std::vector<double> times_tmp;
+    std::vector<Eigen::Matrix4d> covs_tmp;
+    intensities_tmp.reserve(total);
+    times_tmp.reserve(total);
+    covs_tmp.reserve(total);
+
+    for (int i = 0; i < num_voxels(); i++) {
+        const auto& voxel = flat_voxels[i]->second;
+        const Eigen::Matrix4d& voxel_cov = voxel.cov;
+
+        for (size_t p = 0; p < voxel.voxel_points.size(); p++) {
+            frame->points_storage.emplace_back(voxel.voxel_points[p]);
+            covs_tmp.emplace_back(voxel_cov);
+            if (p < voxel.voxel_intensities.size()) {
+                intensities_tmp.push_back(voxel.voxel_intensities[p]);
+            }
+            if (p < voxel.voxel_times.size()) {
+                times_tmp.push_back(voxel.voxel_times[p]);
+            }
+        }
+    }
+
+    frame->num_points = frame->points_storage.size();
+    frame->points = frame->points_storage.data();
+
+    if (!intensities_tmp.empty()) {
+        frame->add_intensities(intensities_tmp);
+    }
+    if (!times_tmp.empty()) {
+        frame->add_times(times_tmp);
+    }
+    if (!covs_tmp.empty()) {
+        frame->add_covs(covs_tmp);
+    }
+
+    return frame;
+}
 
 double DynamicVoxelMapCPU::voxel_resolution() const {
     return leaf_size();

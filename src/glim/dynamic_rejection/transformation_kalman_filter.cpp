@@ -40,6 +40,7 @@ Eigen::Isometry3d PoseKalmanFilter::getDeltaPose() const {
   return T;
 }
 
+
 Eigen::Vector3d PoseKalmanFilter::getVelocity() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return velocity_;

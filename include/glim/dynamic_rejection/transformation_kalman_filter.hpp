@@ -37,6 +37,7 @@ public:
   /// Return the current accumulated relative transform (T_{k-1 -> k})
   Eigen::Isometry3d getDeltaPose() const;
 
+
   /// Return the current velocity estimate
   Eigen::Vector3d getVelocity() const;
 
