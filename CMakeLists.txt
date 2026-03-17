@@ -14,7 +14,8 @@ option(BUILD_WITH_CUDA_MULTIARCH "Build with GPU cross-platform support" OFF)
 option(BUILD_WITH_VIEWER "Build with visualizer" ON)
 option(BUILD_WITH_MARCH_NATIVE "Build with -march=native" OFF)
 option(BUILD_WITH_OPENCV "Build with OpenCV to support camera images" ON)
-option(BUILD_WITH_DYNAMIC_REJECTION "Build with dynamic object rejection" ON)
+option(BUILD_WITH_DYNAMIC_REJECTION_VOXEL "Build with dynamic voxel-based object rejection" OFF)
+option(BUILD_WITH_DYNAMIC_REJECTION_BBOX "Build with dynamic bounding box-based object rejection" ON)
 
 if(BUILD_WITH_MARCH_NATIVE)
   add_definitions(-march=native)
@@ -41,11 +42,22 @@ else()
   set(GLIM_USE_OPENCV 0)
 endif()
 
-if(BUILD_WITH_DYNAMIC_REJECTION)
-  set(GLIM_USE_DYNAMIC_REJECTION 1)
+
+if(BUILD_WITH_DYNAMIC_REJECTION_BBOX)
+  set(GLIM_USE_DYNAMIC_REJECTION_BBOX 1)
+  set(GLIM_USE_DYNAMIC_REJECTION_VOXEL 0)
+
+elseif(BUILD_WITH_DYNAMIC_REJECTION_VOXEL)
+  set(GLIM_USE_DYNAMIC_REJECTION_BBOX 0)
+  set(GLIM_USE_DYNAMIC_REJECTION_VOXEL 1)
+
 else()
-  set(GLIM_USE_DYNAMIC_REJECTION 0)
+  set(GLIM_USE_DYNAMIC_REJECTION_BBOX 0)
+  set(GLIM_USE_DYNAMIC_REJECTION_VOXEL 0)
+
 endif()
+
+
 
 ###########
 ## Build ##
@@ -103,9 +115,11 @@ add_library(glim SHARED
   src/glim/mapping/global_mapping.cpp
   src/glim/mapping/global_mapping_pose_graph.cpp
   # dynamic rejection
-  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/dynamic_object_rejection_cpu.cpp>
-  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/dynamic_voxelmap_cpu.cpp>
-  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION}>:src/glim/dynamic_rejection/async_dynamic_object_rejection_cpu.cpp>
+  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION_VOXEL}>:src/glim/dynamic_rejection/dynamic_object_rejection_cpu.cpp>
+  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION_VOXEL}>:src/glim/dynamic_rejection/dynamic_voxelmap_cpu.cpp>
+  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION_BBOX}>:src/glim/dynamic_rejection/dynamic_bounding_box_rejection.cpp>
+  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION_VOXEL}>:src/glim/dynamic_rejection/async_dynamic_object_rejection_cpu.cpp>
+
   src/glim/dynamic_rejection/transformation_kalman_filter.cpp
   # GPU-related
   ${GPU_SRCS}
