@@ -55,6 +55,8 @@ public:
    */
   std::vector<glim::PreprocessedFrame::Ptr> get_dynamic_results();
 
+  gtsam_points::DynamicVoxelMapCPU::Ptr get_last_voxelmap() const { return dynamic_rejection->get_last_voxelmap(); }
+
 private:
   void run();
 

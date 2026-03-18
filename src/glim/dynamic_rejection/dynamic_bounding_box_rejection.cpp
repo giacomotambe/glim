@@ -1,12 +1,24 @@
-#include <glim/dynamic_rejection/dynamic_bounding_box_rejection.hpp>
-#include <glim/preprocess/preprocessed_frame.hpp>
-#include <glim/preprocess/cloud_preprocessor.hpp>
-#include <spdlog/spdlog.h>
 
+#include <glim/dynamic_rejection/dynamic_bounding_box_rejection.hpp>
+
+#include <fstream>
+#include <iostream>
+#include <spdlog/spdlog.h>
+#include <gtsam_points/config.hpp>
+#include <gtsam_points/ann/kdtree.hpp>
+#include <gtsam_points/types/point_cloud_cpu.hpp>
+#include <gtsam_points/util/parallelism.hpp>
+
+#include <glim/util/config.hpp>
+#include <glim/util/convert_to_string.hpp>
+
+#ifdef GTSAM_POINTS_USE_TBB
+#include <tbb/task_arena.h>
+#include <tbb/parallel_for.h>
+#endif
 namespace glim {
-DynamicBBoxRejection::DynamicBBoxRejection(const std::vector<BoundingBox>& bbox) : bboxes_(bbox) {
-    cloud_preprocessor_ = std::make_unique<CloudPreprocessor>();
-}
+DynamicBBoxRejection::DynamicBBoxRejection(const std::vector<BoundingBox>& bbox) : bboxes_(bbox) {}
+DynamicBBoxRejection::DynamicBBoxRejection() : DynamicBBoxRejection(std::vector<BoundingBox>()) {}
 
 DynamicBBoxRejection::~DynamicBBoxRejection() = default;
 
@@ -23,11 +35,11 @@ PreprocessedFrame::Ptr DynamicBBoxRejection::reject(const PreprocessedFrame::Ptr
         const Eigen::Vector4d& point = frame->points[i];
         bool is_dynamic = false;
         for (const auto& bbox : bboxes_) {
-            if (!bbox.contains(point)) {
+            if (bbox.contains(point)) {
                 is_dynamic = true;
                 dynamic_points.push_back(point);
-                if (frame->intensities) {
-                    dynamic_intensities.push_back(frame->intensities->at(i));
+                if (!frame->intensities.empty()) {
+                    dynamic_intensities.push_back(frame->intensities[i]);
                 }
                 dynamic_times.push_back(frame->times[i]);
                 break;
@@ -35,8 +47,8 @@ PreprocessedFrame::Ptr DynamicBBoxRejection::reject(const PreprocessedFrame::Ptr
         }
         if (!is_dynamic) {
             filtered_points.push_back(point);
-            if (frame->intensities) {
-                filtered_intensities.push_back(frame->intensities->at(i));
+            if (!frame->intensities.empty()) {
+                filtered_intensities.push_back(frame->intensities[i]);
             }
             filtered_times.push_back(frame->times[i]);
 
@@ -49,13 +61,12 @@ PreprocessedFrame::Ptr DynamicBBoxRejection::reject(const PreprocessedFrame::Ptr
 
     preprocessed->times = filtered_times;
     preprocessed->points = filtered_points;
-    if (frame->intensities) {
+    if (!frame->intensities.empty()) {
         preprocessed->intensities = filtered_intensities;
     }
 
-    preprocessed->k_neighbors = params.k_correspondences;
-    preprocessed->neighbors = find_neighbors(filtered_points, filtered_points.size(), params.k_correspondences);
-
+    preprocessed->k_neighbors = frame->k_neighbors;
+    preprocessed->neighbors = find_neighbors(filtered_points.data(), static_cast<int>(filtered_points.size()), frame->k_neighbors);
     spdlog::trace("preprocessed: {} -> {} points", frame->size(), preprocessed->size());
 
     if (!dynamic_points.empty()) {
@@ -64,7 +75,7 @@ PreprocessedFrame::Ptr DynamicBBoxRejection::reject(const PreprocessedFrame::Ptr
         last_dynamic_frame->scan_end_time = frame->scan_end_time;
         last_dynamic_frame->points = dynamic_points;
         last_dynamic_frame->times = dynamic_times;
-        if (frame->intensities) {
+        if (!frame->intensities.empty()) {
             last_dynamic_frame->intensities = dynamic_intensities;
         }
     }
@@ -75,4 +86,38 @@ PreprocessedFrame::Ptr DynamicBBoxRejection::reject(const PreprocessedFrame::Ptr
 void DynamicBBoxRejection::insert_bounding_boxes(BoundingBox& bbox) {
     bboxes_.push_back(bbox);
 }
+
+std::vector<int> DynamicBBoxRejection::find_neighbors(const Eigen::Vector4d* points, const int num_points, const int k) const {
+  gtsam_points::KdTree tree(points, num_points);
+  int num_threads=4;
+  std::vector<int> neighbors(num_points * k);
+
+  const auto perpoint_task = [&](int i) {
+    std::vector<size_t> k_indices(k, i);
+    std::vector<double> k_sq_dists(k);
+    size_t num_found = tree.knn_search(points[i].data(), k, k_indices.data(), k_sq_dists.data());
+    std::copy(k_indices.begin(), k_indices.begin() + num_found, neighbors.begin() + i * k);
+  };
+
+  if (gtsam_points::is_omp_default()) {
+#pragma omp parallel for num_threads(num_threads) schedule(guided, 8)
+    for (int i = 0; i < num_points; i++) {
+      perpoint_task(i);
+    }
+  } else {
+#ifdef GTSAM_POINTS_USE_TBB
+    tbb::parallel_for(tbb::blocked_range<int>(0, num_points, 8), [&](const tbb::blocked_range<int>& range) {
+      for (int i = range.begin(); i < range.end(); i++) {
+        perpoint_task(i);
+      }
+    });
+#else
+    std::cerr << "error : TBB is not enabled" << std::endl;
+    abort();
+#endif
+  }
+
+  return neighbors;
+}
+
 }  // namespace glim

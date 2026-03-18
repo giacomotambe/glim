@@ -1,7 +1,7 @@
+#include <memory>
 #include <vector>
-#include <Eigen/Core>
-#include <Eigen/Geometry>
 #include <glim/dynamic_rejection/bounding_box.hpp>
+#include <glim/preprocess/preprocessed_frame.hpp>
 
 namespace glim {
 class DynamicBBoxRejection {
@@ -10,7 +10,7 @@ public:
     using ConstPtr = std::shared_ptr<const DynamicBBoxRejection>;
 
     DynamicBBoxRejection(const std::vector<BoundingBox>& bbox);
-    DyanamicBBoxRejection();
+    DynamicBBoxRejection();
     ~DynamicBBoxRejection();
 
     /**
@@ -24,9 +24,10 @@ public:
     void set_bounding_boxes(const std::vector<BoundingBox>& bboxes) { bboxes_ = bboxes; }
     PreprocessedFrame::Ptr get_last_dynamic_frame() const { return last_dynamic_frame; }
 private:
+    std::vector<int> find_neighbors(const Eigen::Vector4d* points, const int num_points, const int k) const;
+private:
     std::vector<BoundingBox> bboxes_;
     PreprocessedFrame::Ptr last_dynamic_frame = nullptr; ///< last frame containing only dynamic points (for visualization or other purposes)
-    std::unique_ptr<CloudPreprocessor> cloud_preprocessor_; ///< Kalman filter for pose estimation to assist in dynamic object rejection
 };  
 
 }  // namespace glim    

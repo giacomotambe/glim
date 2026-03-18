@@ -115,10 +115,12 @@ add_library(glim SHARED
   src/glim/mapping/global_mapping.cpp
   src/glim/mapping/global_mapping_pose_graph.cpp
   # dynamic rejection
-  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION_VOXEL}>:src/glim/dynamic_rejection/dynamic_object_rejection_cpu.cpp>
-  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION_VOXEL}>:src/glim/dynamic_rejection/dynamic_voxelmap_cpu.cpp>
-  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION_BBOX}>:src/glim/dynamic_rejection/dynamic_bounding_box_rejection.cpp>
-  $<$<BOOL:${BUILD_WITH_DYNAMIC_REJECTION_VOXEL}>:src/glim/dynamic_rejection/async_dynamic_object_rejection_cpu.cpp>
+  src/glim/dynamic_rejection/dynamic_object_rejection_cpu.cpp
+  src/glim/dynamic_rejection/dynamic_voxelmap_cpu.cpp
+  src/glim/dynamic_rejection/dynamic_bounding_box_rejection.cpp
+  src/glim/dynamic_rejection/bounding_box.cpp
+  src/glim/dynamic_rejection/async_dynamic_object_rejection_cpu.cpp
+
 
   src/glim/dynamic_rejection/transformation_kalman_filter.cpp
   # GPU-related

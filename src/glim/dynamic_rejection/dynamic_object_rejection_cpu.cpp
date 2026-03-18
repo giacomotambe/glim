@@ -110,7 +110,9 @@ std::vector<int> DynamicObjectRejectionCPU::get_neighbor_voxels(
     std::vector<int> neighbors;
 
     auto coord = voxelmap->voxel_coord(mean);
-
+    spdlog::debug("[dynamic_rejection] get_neighbor_voxels: mean=({}, {}, {}), coord=({}, {}, {})",
+                  mean.x(), mean.y(), mean.z(),
+                  coord.x(), coord.y(), coord.z());
     for(int dx=-1; dx<=1; dx++)
     for(int dy=-1; dy<=1; dy++)
     for(int dz=-1; dz<=1; dz++)
@@ -124,7 +126,8 @@ std::vector<int> DynamicObjectRejectionCPU::get_neighbor_voxels(
         c.z() += dz;
 
         int idx = voxelmap->lookup_voxel_index(c);
-
+        spdlog::debug("[dynamic_rejection] get_neighbor_voxels: checking neighbor voxel at offset ({}, {}, {}), coord=({}, {}, {}), idx={}",
+                      dx, dy, dz, c.x(), c.y(), c.z(), idx);
         if(idx >= 0)
             neighbors.push_back(idx);
     }
@@ -259,10 +262,20 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
     const int prev_nvox = static_cast<int>(
         prev_voxelmap->gtsam_points::IncrementalVoxelMap<gtsam_points::DynamicGaussianVoxel>::num_voxels());
     const int compare_nvox = nvox;
-
+    
+    dynamic_voxels_neighbor_indices.clear();
 
     for (int j = 0; j < compare_nvox; j++) {
         auto& current_voxel = current_voxelmap->lookup_voxel(j);
+        if(current_voxel.num_points < 10)
+        {
+            // Too few points to reliably compare → treat as static
+            static_points.insert(static_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
+            static_intensities.insert(static_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
+            static_times.insert(static_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
+            continue;
+        }
+
         // auto& prev_voxel = prev_voxelmap->lookup_voxel(j);
         auto coord = current_voxelmap->voxel_coord(current_voxel.mean);
         int voxel_index = prev_voxelmap->lookup_voxel_index(coord);
@@ -270,30 +283,28 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         if(voxel_index < 0)
         {
             // Voxel doesn't exist in previous frame → new part of environment → treat as static
-            current_voxel.is_dynamic = false;
-            static_points.insert(static_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
-            static_intensities.insert(static_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
-            static_times.insert(static_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
+            current_voxel.is_dynamic = true;
+            dynamic_points.insert(dynamic_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
+            dynamic_intensities.insert(dynamic_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
+            dynamic_times.insert(dynamic_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
             continue;
         }
         auto& prev_voxel = prev_voxelmap->lookup_voxel(voxel_index);
 
         // Compare voxel properties (mean, covariance, number of points) to classify as dynamic or static
         current_voxel.is_dynamic = false; // reset dynamic flag, will be updated by checks below
-        if(prev_voxel.is_dynamic)
-            current_voxel.dynamic_score=prev_voxel.dynamic_score*exp(-1.0);
-        else 
-            current_voxel.dynamic_score=0;
-        if(current_voxel.num_points < 20 || prev_voxel.num_points < 20)
-        {
-            // Too few points to reliably compare → treat as static
-            spdlog::debug("[dynamic_rejection] voxel {} too few points (curr={} prev={}), treating as static",j, current_voxel.num_points, prev_voxel.num_points);
-            static_points.insert(static_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
-            static_intensities.insert(static_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
-            static_times.insert(static_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
-            continue;
-        }
+        current_voxel.dynamic_score = 0.0; // reset dynamic score
+        // if(current_voxel.num_points < 20 || prev_voxel.num_points < 20)
+        // {
+        //     // Too few points to reliably compare → treat as static
+        //     spdlog::debug("[dynamic_rejection] voxel {} too few points (curr={} prev={}), treating as static",j, current_voxel.num_points, prev_voxel.num_points);
+        //     static_points.insert(static_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
+        //     static_intensities.insert(static_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
+        //     static_times.insert(static_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
+        //     continue;
+        // }
 
+        
         Eigen::Vector3d delta = (current_voxel.mean - prev_voxel.mean).head<3>();
         double mean_dist = delta.norm();
 
@@ -383,7 +394,7 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         current_voxel.dynamic_score += params_.w_occupancy * occ_ratio;
         
         /* Add history factor to boost score if voxel was previously classified as dynamic */
-        
+        int num_static_in_history = 0;
         for (int k=0; k < params_.frame_num_memory; k++){
             if(last_voxelmaps.size() > static_cast<size_t>(k))
             {
@@ -394,34 +405,38 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
                     continue;
                 auto& past_voxel = past_map->lookup_voxel(past_voxel_index);
                 spdlog::debug("[dynamic_rejection] voxel {} history k={} is_dynamic={}", j, k, past_voxel.is_dynamic);
-                if(past_voxel.is_dynamic)
+                if(!past_voxel.is_dynamic)
                 {
-                    //current_voxel.dynamic_score += std::exp(-k) * params_.history_factor; // decaying boost for recent history
-                }
-                else
-                {
-                    current_voxel.dynamic_score -= std::exp(-k) * params_.history_factor; // decaying penalty if it was static in the past
+                    //current_voxel.dynamic_score -= std::exp(-k) * params_.history_factor; // decaying penalty if it was static in the past
+                    num_static_in_history++;
                 }
             }
         }
-        
+        spdlog::info("[dynamic_rejection] tot {} static={}", last_voxelmaps.size(), num_static_in_history);
+        double percent_static_in_history = 100.0 * num_static_in_history / last_voxelmaps.size();
+        if (percent_static_in_history > params_.history_factor * 100.0) {
+            current_voxel.is_dynamic = false; // if voxel was static in most of the past frames, classify as static regardless of current score
+            spdlog::debug("[dynamic_rejection] voxel {} classified as STATIC due to history ({}% static in history)", j, percent_static_in_history);
+            continue;
+        }
         // current_voxel.dynamic_score += params_.history_factor * (prev_voxel.is_dynamic ? 1.0 : -1.0);
 
-        spdlog::info("[dynamic_rejection] voxel {} score={} (shift={} mahal={} cov={} shape={} occ={})",j, current_voxel.dynamic_score, centroid_shift, mahal, cov_norm, shape_change, occ_ratio);
+        spdlog::debug("[dynamic_rejection] voxel {} score={} (shift={} mahal={} cov={} shape={} occ={})",j, current_voxel.dynamic_score, centroid_shift, mahal, cov_norm, shape_change, occ_ratio);
 
         if(current_voxel.dynamic_score > params_.dynamic_score_threshold)
         {
             current_voxel.is_dynamic = true;
+            auto neighbor_indices = get_neighbor_voxels(current_voxelmap, current_voxel.mean);
+            dynamic_voxels_neighbor_indices.insert(dynamic_voxels_neighbor_indices.end(), neighbor_indices.begin(), neighbor_indices.end());
             
-            spdlog::info("[dynamic_rejection] voxel {} classified as DYNAMIC", j);
+            spdlog::debug("[dynamic_rejection] voxel {} classified as DYNAMIC", j);
         }
         else
         {
-            spdlog::info("[dynamic_rejection] voxel {} classified as STATIC", j);
+            spdlog::debug("[dynamic_rejection] voxel {} classified as STATIC", j);
         }
 
-        auto neighbor_indices = get_neighbor_voxels(current_voxelmap, current_voxel.mean);
-        dynamic_voxels_neighbor_indices.insert(dynamic_voxels_neighbor_indices.end(), neighbor_indices.begin(), neighbor_indices.end());
+        
             
         
         // if(recursive_level < params_.voxelmap_levels && current_voxel.is_dynamic) {
@@ -438,18 +453,19 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
     }
     
     for(auto idx : dynamic_voxels_neighbor_indices) {
-        if(idx < 0 || idx >= prev_nvox)
+        if(idx < 0 || idx >= nvox)
             continue;
-
-        auto& neighbor_voxel = prev_voxelmap->lookup_voxel(idx);
+        
+        auto& neighbor_voxel = current_voxelmap->lookup_voxel(idx);
+        spdlog::debug("[dynamic_rejection] boosting neighbor voxel {} score={} is_dynamic={}", idx, neighbor_voxel.dynamic_score, neighbor_voxel.is_dynamic);
         if(neighbor_voxel.is_dynamic)
-            neighbor_voxel.dynamic_score += params_.w_neighbor;
-            if(neighbor_voxel.dynamic_score > params_.dynamic_score_threshold)
-                neighbor_voxel.is_dynamic = true;   
+            continue; // already classified as dynamic, no need to boost score
+        neighbor_voxel.dynamic_score += params_.w_neighbor;
+        if(neighbor_voxel.dynamic_score > params_.dynamic_score_threshold)
+            neighbor_voxel.is_dynamic = true;   
     }
     
-    
-    for (int j = 0; j < compare_nvox; j++) {
+    for (int j = 0; j < nvox; j++) {
         auto& current_voxel = current_voxelmap->lookup_voxel(j);
          if(!current_voxel.is_dynamic){
             // accumulate static points for output frame
