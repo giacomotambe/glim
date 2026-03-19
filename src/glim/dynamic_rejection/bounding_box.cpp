@@ -32,3 +32,4 @@ bool BoundingBox::contains(const Eigen::Vector4d& point) const {
             std::abs(local_p.z()) <= half_size.z());
 }
 }
+

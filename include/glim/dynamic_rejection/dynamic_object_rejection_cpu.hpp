@@ -16,10 +16,6 @@ struct DynamicObjectRejectionParamsCPU {
         ~DynamicObjectRejectionParamsCPU();
     
     public:
-        double mean_difference_threshold; ///< Threshold for mean difference to classify a point as dynamic
-        double covariance_error_threshold; ///< Threshold for variance difference to classify a point as dynamic
-        int points_number_difference_threshold; ///< Threshold for the number of points difference to classify a point as dynamic
-        double mahalanobis_distance_threshold; ///< Threshold for Mahalanobis distance to classify a point as dynamic
         double dynamic_score_threshold; ///< Threshold for the combined dynamic score to classify a point as dynamic
         double voxel_resolution; 
         int voxelmap_levels;
@@ -104,6 +100,14 @@ private:
     std::vector<int> dynamic_voxels_neighbor_indices; // to store the indices of neighboring voxels for each dynamic voxel, used for boosting the dynamic score of neighboring voxels
     std::unique_ptr<CloudCovarianceEstimation> covariance_estimation;
     std::shared_ptr<PoseKalmanFilter> pose_kalman_filter; // for fusing IMU and SLAM pose estimates to get a more accurate odometry estimation
+
+
+    //clustering
+    // Cluster di voxel (indici)
+    std::vector<std::vector<int>> dynamic_voxel_clusters;
+
+    // Cluster di punti (output finale)
+    std::vector<std::vector<Eigen::Vector4d>> dynamic_point_clusters;
 
 };
 

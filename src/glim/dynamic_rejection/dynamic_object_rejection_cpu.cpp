@@ -25,10 +25,6 @@ namespace glim {
 DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU() {
     spdlog::debug("[dynamic_rejection] DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU begin");
     Config config(GlobalConfig::get_config_path("config_dynamic_object_rejection"));
-    mean_difference_threshold = config.param<double>("dynamic_object_rejection", "mean_difference_threshold", 0.5);
-    covariance_error_threshold = config.param<double>("dynamic_object_rejection", "covariance_error_threshold", 0.5);
-    points_number_difference_threshold = config.param<int>("dynamic_object_rejection", "points_number_difference_threshold", 10);
-    mahalanobis_distance_threshold = config.param<double>("dynamic_object_rejection", "mahalanobis_distance_threshold", 5.0);
     dynamic_score_threshold = config.param<double>("dynamic_object_rejection", "dynamic_score_threshold", 2.5);
     num_threads = config.param<int>("dynamic_object_rejection", "num_threads", 4);
     w_shift = config.param<double>("dynamic_object_rejection", "w_shift", 1.0);
@@ -192,7 +188,7 @@ PreprocessedFrame::Ptr DynamicObjectRejectionCPU::dynamic_object_rejection(const
 
     
     
-    // Store voxelmap for next frame comparison
+    // Store voxelmap for next frame comparisons
     last_voxelmaps.push_back(voxelmap);
     if (last_voxelmaps.size() > params_.frame_num_memory) {
         last_voxelmaps.erase(last_voxelmaps.begin());
@@ -270,9 +266,7 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         if(current_voxel.num_points < 10)
         {
             // Too few points to reliably compare → treat as static
-            static_points.insert(static_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
-            static_intensities.insert(static_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
-            static_times.insert(static_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
+            current_voxel.is_dynamic = false;
             continue;
         }
 
@@ -284,9 +278,6 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
         {
             // Voxel doesn't exist in previous frame → new part of environment → treat as static
             current_voxel.is_dynamic = true;
-            dynamic_points.insert(dynamic_points.end(), current_voxel.voxel_points.begin(), current_voxel.voxel_points.end());
-            dynamic_intensities.insert(dynamic_intensities.end(), current_voxel.voxel_intensities.begin(), current_voxel.voxel_intensities.end());
-            dynamic_times.insert(dynamic_times.end(), current_voxel.voxel_times.begin(), current_voxel.voxel_times.end());
             continue;
         }
         auto& prev_voxel = prev_voxelmap->lookup_voxel(voxel_index);
@@ -412,7 +403,7 @@ gtsam_points::DynamicVoxelMapCPU::Ptr DynamicObjectRejectionCPU::dynamic_object_
                 }
             }
         }
-        spdlog::info("[dynamic_rejection] tot {} static={}", last_voxelmaps.size(), num_static_in_history);
+        spdlog::debug("[dynamic_rejection] tot {} static={}", last_voxelmaps.size(), num_static_in_history);
         double percent_static_in_history = 100.0 * num_static_in_history / last_voxelmaps.size();
         if (percent_static_in_history > params_.history_factor * 100.0) {
             current_voxel.is_dynamic = false; // if voxel was static in most of the past frames, classify as static regardless of current score
