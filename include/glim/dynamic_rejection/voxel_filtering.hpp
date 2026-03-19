@@ -28,41 +28,27 @@ struct PlaneModel {
 // Risultato di WallFilter::filter()
 // ---------------------------------------------------------------------------
 struct WallFilterResult {
-    /// Voxelmap contenente SOLO i voxel non-parete.
-    /// Passato direttamente a DynamicObjectRejectionCPU (no re-voxelizzazione).
     gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap;
-
-    /// Piani-parete trovati da RANSAC (utile per debug/visualizzazione)
     std::vector<PlaneModel> wall_planes;
-
-    /// Numero di voxel classificati come parete (rimossi dalla voxelmap)
-    int num_wall_voxels = 0;
-
-    /// Numero di voxel totali prima del filtraggio
+    int num_wall_voxels  = 0;
     int num_total_voxels = 0;
 };
 
 // ---------------------------------------------------------------------------
 // Configurazione
 // ---------------------------------------------------------------------------
+
 struct WallFilterConfig {
-    // Voxelizzazione — deve coincidere con voxel_resolution dell'odometry
-    double voxel_resolution = 0.5;
+    double voxel_resolution;
+    int    ransac_max_iterations;
+    double ransac_inlier_threshold;
+    int    ransac_min_inliers;
+    double ransac_confidence;
+    double wall_vertical_angle_deg;
+    int    max_planes;
 
-    // RANSAC
-    int    ransac_max_iterations   = 500;
-    double ransac_inlier_threshold = 0.15;  // [m] — usata anche per marcare i voxel
-    int    ransac_min_inliers      = 8;
-    double ransac_confidence       = 0.99;
-
-    // Classificazione parete:
-    // angolo massimo (gradi) tra la normale del piano e il piano orizzontale XY.
-    // Pareti quasi verticali hanno normale quasi orizzontale → |nz| piccolo.
-    // Es. 20° → accetta pareti inclinate al massimo di 20° rispetto alla verticale.
-    double wall_vertical_angle_deg = 20.0;
-
-    // Estrazione multi-piano
-    int max_planes = 8;
+    WallFilterConfig();   // reads from config file
+    ~WallFilterConfig();
 };
 
 // ---------------------------------------------------------------------------

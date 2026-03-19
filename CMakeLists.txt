@@ -120,9 +120,9 @@ add_library(glim SHARED
   src/glim/dynamic_rejection/dynamic_bounding_box_rejection.cpp
   src/glim/dynamic_rejection/bounding_box.cpp
   src/glim/dynamic_rejection/async_dynamic_object_rejection_cpu.cpp
-
-
   src/glim/dynamic_rejection/transformation_kalman_filter.cpp
+  src/glim/dynamic_rejection/voxel_filtering.cpp
+  #src/glim/dynamic_rejection/dynamic_cluster_extractor.cpp
   # GPU-related
   ${GPU_SRCS}
 )

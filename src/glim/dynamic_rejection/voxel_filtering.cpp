@@ -1,15 +1,40 @@
-#include "wall_filter.hpp"
+#include <glim/dynamic_rejection/voxel_filtering.hpp>
 
 #include <algorithm>
 #include <cmath>
 
 #include <glim/preprocess/preprocessed_frame.hpp>
+#include <glim/util/config.hpp>
 #include <gtsam_points/types/point_cloud_cpu.hpp>
 #include <gtsam_points/ann/impl/incremental_voxelmap_impl.hpp>
 
 #include <spdlog/spdlog.h>
 
 namespace glim {
+
+
+WallFilterConfig::WallFilterConfig() {
+    spdlog::debug("[wall_filter] WallFilterConfig::WallFilterConfig begin");
+    Config config(GlobalConfig::get_config_path("config_wall_filter"));
+
+    // voxel resolution must match odometry to reuse the same voxelmap
+    voxel_resolution        = config.param<double>("wall_filter", "voxel_resolution",        0.5);
+    ransac_max_iterations   = config.param<int>   ("wall_filter", "ransac_max_iterations",   500);
+    ransac_inlier_threshold = config.param<double>("wall_filter", "ransac_inlier_threshold", 0.15);
+    ransac_min_inliers      = config.param<int>   ("wall_filter", "ransac_min_inliers",      8);
+    ransac_confidence       = config.param<double>("wall_filter", "ransac_confidence",       0.99);
+    wall_vertical_angle_deg = config.param<double>("wall_filter", "wall_vertical_angle_deg", 20.0);
+    max_planes              = config.param<int>   ("wall_filter", "max_planes",              8);
+
+    spdlog::debug("[wall_filter] WallFilterConfig: res={} ransac_iter={} thresh={} min_inliers={} "
+                  "conf={} angle_deg={} max_planes={}",
+                  voxel_resolution, ransac_max_iterations, ransac_inlier_threshold,
+                  ransac_min_inliers, ransac_confidence, wall_vertical_angle_deg, max_planes);
+}
+
+WallFilterConfig::~WallFilterConfig() {
+    spdlog::debug("[wall_filter] WallFilterConfig::~WallFilterConfig");
+}
 
 // ---------------------------------------------------------------------------
 WallFilter::WallFilter(const WallFilterConfig& config)

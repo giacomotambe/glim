@@ -3,78 +3,86 @@
 #include <atomic>
 #include <thread>
 #include <memory>
+
 #include <glim/dynamic_rejection/dynamic_object_rejection_cpu.hpp>
+#include <glim/dynamic_rejection/voxel_filtering.hpp>
 #include <glim/util/concurrent_vector.hpp>
 #include <glim/preprocess/preprocessed_frame.hpp>
 
 namespace glim {
 
 /**
- * @brief Async wrapper for DynamicObjectRejectionCPU to run dynamic object rejection asynchronously
- * @note  All the exposed public methods are thread-safe
+ * @brief Async wrapper that runs the two-stage dynamic rejection pipeline
+ *        (WallFilter → DynamicObjectRejectionCPU) on a background thread.
+ *
+ * Ownership model
+ * ---------------
+ *   - WallFilter       : shared ownership (injected at construction).
+ *   - DynamicObjectRejectionCPU : shared ownership (injected at construction).
+ *
+ * Call sequence per frame (from the producer thread):
+ *   async.insert_frame(frame);
+ *
+ * The background thread executes for each frame:
+ *   1. wall_filter_->filter(*frame)          — voxelize + mark wall voxels
+ *   2. dynamic_rejection_->reject(wf, frame) — score + split points
+ *
+ * Results are retrieved from the caller's thread at any time:
+ *   auto static_frames  = async.get_results();
+ *   auto dynamic_frames = async.get_dynamic_results();
  */
 class AsyncDynamicObjectRejection {
 public:
-  /**
-   * @brief Construct a new Async Dynamic Object Rejection object
-   * @param dynamic_rejection Dynamic object rejection object to wrap
-   */
-  AsyncDynamicObjectRejection(const std::shared_ptr<DynamicObjectRejectionCPU>& dynamic_rejection);
+    /**
+     * @param dynamic_rejection  Scorer (DynamicObjectRejectionCPU).
+     * @param wall_filter        Voxelizer + wall marker (WallFilter).
+     */
+    AsyncDynamicObjectRejection(
+        const std::shared_ptr<DynamicObjectRejectionCPU>& dynamic_rejection,
+        const std::shared_ptr<WallFilter>&                wall_filter);
 
-  /**
-   * @brief Destroy the Async Dynamic Object Rejection object
-   */
-  ~AsyncDynamicObjectRejection();
+    ~AsyncDynamicObjectRejection();
 
-  /**
-   * @brief Insert a frame for dynamic object rejection
-   * @param frame Current preprocessed frame
-   */
-  void insert_frame(const glim::PreprocessedFrame::Ptr& frame);
+    /// Push a frame into the input queue (thread-safe).
+    void insert_frame(const glim::PreprocessedFrame::Ptr& frame);
 
-  /**
-   * @brief Wait for the dynamic rejection thread
-   */
-  void join();
+    /// Signal end-of-sequence and block until the background thread finishes.
+    void join();
 
-  /**
-   * @brief Number of data in the input queue (for load control)
-   * @return Input queue size
-   */
-  int workload() const;
+    /// Number of frames still waiting in the input queue.
+    int workload() const;
 
-  /**
-   * @brief Get the processed frames without dynamic objects
-   * @return Processed frames
-   */
-  std::vector<glim::PreprocessedFrame::Ptr> get_results();
+    /// Drain and return all processed static frames.
+    std::vector<glim::PreprocessedFrame::Ptr> get_results();
 
-  /**
-   * @brief Get the frames containing only dynamic points
-   * @return Dynamic-only frames
-   */
-  std::vector<glim::PreprocessedFrame::Ptr> get_dynamic_results();
+    /// Drain and return all processed dynamic-only frames.
+    std::vector<glim::PreprocessedFrame::Ptr> get_dynamic_results();
 
-  gtsam_points::DynamicVoxelMapCPU::Ptr get_last_voxelmap() const { return dynamic_rejection->get_last_voxelmap(); }
+    /// Drain and return WallFilterResults (one per processed frame).
+    /// Each result carries the voxelmap with is_wall flags set and the list
+    /// of detected wall planes — useful for publishing wall point clouds.
+    std::vector<WallFilterResult> get_wall_results();
+
+    /// Expose the most-recent voxelmap for external visualization.
+    gtsam_points::DynamicVoxelMapCPU::Ptr get_last_voxelmap() const {
+        return dynamic_rejection_->get_last_voxelmap();
+    }
 
 private:
-  void run();
+    void run();
 
 private:
-  std::atomic_bool kill_switch;      // Flag to stop the thread immediately (Hard kill switch)
-  std::atomic_bool end_of_sequence;  // Flag to stop the thread when the input queues become empty (Soft kill switch)
-  std::thread thread;
+    std::atomic_bool kill_switch;
+    std::atomic_bool end_of_sequence;
+    std::thread      thread;
 
-  // Input queue
-  ConcurrentVector<glim::PreprocessedFrame::Ptr> input_frame_queue;
+    ConcurrentVector<glim::PreprocessedFrame::Ptr> input_frame_queue;
+    ConcurrentVector<glim::PreprocessedFrame::Ptr> output_frame_queue;
+    ConcurrentVector<glim::PreprocessedFrame::Ptr> dynamic_frame_queue;
+    ConcurrentVector<WallFilterResult>             wall_result_queue;
 
-  // Output queue
-  ConcurrentVector<glim::PreprocessedFrame::Ptr> output_frame_queue;
-
-  // Dynamic-only output queue
-  ConcurrentVector<glim::PreprocessedFrame::Ptr> dynamic_frame_queue;
-
-  std::shared_ptr<DynamicObjectRejectionCPU> dynamic_rejection;
+    std::shared_ptr<DynamicObjectRejectionCPU> dynamic_rejection_;
+    std::shared_ptr<WallFilter>                wall_filter_;
 };
 
 }  // namespace glim

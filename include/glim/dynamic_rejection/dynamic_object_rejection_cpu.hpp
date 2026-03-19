@@ -2,113 +2,189 @@
 
 #include <vector>
 #include <glim/preprocess/preprocessed_frame.hpp>
-#include <gtsam_points/types/gaussian_voxelmap.hpp>
 #include <glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp>
-#include <glim/common/cloud_covariance_estimation.hpp>
 #include <glim/dynamic_rejection/transformation_kalman_filter.hpp>
-
-
+#include <glim/dynamic_rejection/voxel_filtering.hpp>
+#include <glim/common/cloud_covariance_estimation.hpp>
 
 namespace glim {
+
+// ---------------------------------------------------------------------------
+// Parameters
+// ---------------------------------------------------------------------------
+
 struct DynamicObjectRejectionParamsCPU {
-    public: 
-        DynamicObjectRejectionParamsCPU();
-        ~DynamicObjectRejectionParamsCPU();
-    
-    public:
-        double dynamic_score_threshold; ///< Threshold for the combined dynamic score to classify a point as dynamic
-        double voxel_resolution; 
-        int voxelmap_levels;
-        double voxelmap_scaling_factor;
-        int num_threads;
-        double w_shift;
-        double w_mahalanobis;
-        double w_covariance_difference;
-        double w_shape;
-        double w_neighbor;
-        double w_occupancy;
-        double history_factor;
-        int frame_num_memory;
+public:
+    DynamicObjectRejectionParamsCPU();
+    ~DynamicObjectRejectionParamsCPU();
 
+public:
+    // Scoring weights
+    double dynamic_score_threshold;
+    double w_shift;
+    double w_mahalanobis;
+    double w_covariance_difference;
+    double w_shape;
+    double w_neighbor;
+    double w_occupancy;
 
+    // History
+    double history_factor;
+    int    frame_num_memory;
+
+    // Voxelization — must match odometry and WallFilter settings
+    double voxel_resolution;
+
+    // Misc
+    int num_threads;
 };
 
+// ---------------------------------------------------------------------------
+// Result of a single rejection pass
+// ---------------------------------------------------------------------------
+
+struct DynamicRejectionResult {
+    /// Points classified as static, ready for odometry / mapping.
+    PreprocessedFrame::Ptr static_frame;
+
+    /// Points classified as dynamic (nullptr when none found).
+    PreprocessedFrame::Ptr dynamic_frame;
+
+    /// The classified voxelmap: wall voxels marked by WallFilter,
+    /// dynamic voxels marked by the scorer. Useful for visualization.
+    gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap;
+};
+
+// ---------------------------------------------------------------------------
+// DynamicObjectRejectionCPU
+//
+// Expected call sequence (caller owns both objects):
+//
+//   WallFilter             wall_filter(wall_cfg);
+//   DynamicObjectRejectionCPU rejector(params);
+//
+//   // per frame:
+//   WallFilterResult wf       = wall_filter.filter(*frame);
+//   DynamicRejectionResult dr = rejector.reject(wf, frame);
+//
+// WallFilter::filter() already builds the DynamicVoxelMapCPU and marks wall
+// voxels (is_wall = true).  reject() consumes that voxelmap directly — no
+// second voxelization is performed.
+// ---------------------------------------------------------------------------
 
 class DynamicObjectRejectionCPU {
 public:
+    // -----------------------------------------------------------------------
+    // Construction
+    // -----------------------------------------------------------------------
+
+    explicit DynamicObjectRejectionCPU(
+        const DynamicObjectRejectionParamsCPU&   params               = DynamicObjectRejectionParamsCPU(),
+        const std::shared_ptr<PoseKalmanFilter>&  pose_kalman_filter   = nullptr);
+
+    // -----------------------------------------------------------------------
+    // Primary API
+    // -----------------------------------------------------------------------
 
     /**
-     * @brief Constructor
+     * @brief  Score voxels and split points into static / dynamic frames.
+     *
+     * Takes the WallFilterResult produced by WallFilter::filter() for the
+     * current scan.  The voxelmap inside wf_result is used directly — no
+     * additional voxelization is performed.
+     *
+     * Wall voxels (is_wall == true) are unconditionally kept as static.
+     * All other voxels are scored against the previous frame's voxelmap and
+     * classified as static or dynamic based on the configured weights and
+     * threshold.
+     *
+     * On the first call (empty history) the voxelmap is stored as the
+     * reference frame and source_frame is returned unchanged as static output.
+     *
+     * @param wf_result    Result of WallFilter::filter() for the current scan.
+     * @param source_frame Original PreprocessedFrame; provides stamp,
+     *                     scan_end_time, and k_neighbors for the output frames.
+     * @return             DynamicRejectionResult{static_frame, dynamic_frame, voxelmap}.
      */
-  DynamicObjectRejectionCPU(const DynamicObjectRejectionParamsCPU& params=DynamicObjectRejectionParamsCPU(), const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter=nullptr);
+    DynamicRejectionResult reject(
+        const WallFilterResult&       wf_result,
+        const PreprocessedFrame::Ptr& source_frame);
 
+    // -----------------------------------------------------------------------
+    // Accessors
+    // -----------------------------------------------------------------------
 
-    /**
-      * @brief Get the indices of points classified as dynamic
-      * @return std::vector<int> Indices of dynamic points
-      */
-  PreprocessedFrame::Ptr dynamic_object_rejection(const PreprocessedFrame::Ptr frame);
-    /**
-     * @brief Get the indices of points classified as dynamic
-     * @return std::vector<int> Indices of dynamic points
-     */
-  std::vector<int> get_dynamic_points_indices() const { return dynamic_voxels_indices; }
+    PreprocessedFrame::Ptr get_last_dynamic_frame() const {
+        return last_dynamic_frame_;
+    }
 
-  /**
-   * @brief Get the last dynamic frame (points classified as dynamic)
-   * @return PreprocessedFrame containing only dynamic points, or nullptr if none
-   */
-  PreprocessedFrame::Ptr get_last_dynamic_frame() const { return last_dynamic_frame; }
-  gtsam_points::DynamicVoxelMapCPU::Ptr get_last_voxelmap() const { return last_voxelmaps.empty() ? nullptr : last_voxelmaps.back(); }
+    gtsam_points::DynamicVoxelMapCPU::Ptr get_last_voxelmap() const {
+        return voxelmap_history_.empty() ? nullptr : voxelmap_history_.back();
+    }
+
+    std::vector<int> get_dynamic_voxel_indices() const {
+        return dynamic_voxels_indices_;
+    }
+
 private:
+    // -----------------------------------------------------------------------
+    // Pipeline steps (called in order inside reject())
+    // -----------------------------------------------------------------------
 
-  // Add odometry information to the voxelmaps (e.g., by transforming them according to the estimated pose) and replace each element in-place
-  void add_odometry(std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr>& voxelmaps, const Eigen::Isometry3d& T_world_imu);
+    /// Per-voxel scoring against the previous voxelmap.
+    /// Populates dynamic_voxels_indices_ and dynamic_voxels_neighbor_indices_.
+    void score_voxels(
+        gtsam_points::DynamicVoxelMapCPU&       current,
+        const gtsam_points::DynamicVoxelMapCPU& previous);
 
-  std::vector<int> find_neighbors(const Eigen::Vector4d* points, const int num_points, const int k) const;
+    /// Boost the dynamic score of direct neighbours of confirmed dynamic voxels
+    /// and re-apply the threshold.
+    void propagate_to_neighbors(
+        gtsam_points::DynamicVoxelMapCPU& voxelmap, int nvox);
 
-  std::vector<int> get_neighbor_voxels(gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap, const Eigen::Vector4d& mean);
+    /// Iterate all voxels and append their raw points to the appropriate bucket.
+    void collect_points(
+        const gtsam_points::DynamicVoxelMapCPU& voxelmap,
+        std::vector<Eigen::Vector4d>& static_pts,
+        std::vector<double>&          static_int,
+        std::vector<double>&          static_tim,
+        std::vector<Eigen::Vector4d>& dynamic_pts,
+        std::vector<double>&          dynamic_int,
+        std::vector<double>&          dynamic_tim) const;
 
-  void compare_voxels(gtsam_points::DynamicGaussianVoxel& current_voxel, const gtsam_points::DynamicGaussianVoxel& prev_voxel);
+    /// Assemble a PreprocessedFrame from point/intensity/time vectors,
+    /// recomputing neighbor indices when source.k_neighbors > 0.
+    PreprocessedFrame::Ptr build_frame(
+        std::vector<Eigen::Vector4d> points,
+        std::vector<double>          intensities,
+        std::vector<double>          times,
+        const PreprocessedFrame&     source) const;
 
-  /**
-     * @brief Recognize dynamic objects in the current frame by comparing it with the previous frame and return a new estimation frame without points classified as dynamic.
-     * @param frame Current preprocessed frame
-     * @param prev_frame Previous estimation frame
-     * @return gtsam_points::DynamicVoxelMapCPU::Ptr New dynamic voxel map
-    */
-  gtsam_points::DynamicVoxelMapCPU::Ptr dynamic_object_recognition(gtsam_points::DynamicVoxelMapCPU::Ptr current_voxelmap, gtsam_points::DynamicVoxelMapCPU::Ptr prev_voxelmap);
-  
+    /// KNN neighbor search used by build_frame().
+    std::vector<int> find_neighbors(
+        const Eigen::Vector4d* points, int num_points, int k) const;
+
+    /// Return indices of the 26 direct voxel neighbours of a given centroid.
+    std::vector<int> get_neighbor_voxels(
+        const gtsam_points::DynamicVoxelMapCPU& voxelmap,
+        const Eigen::Vector4d& mean) const;
+
 private:
+    // -----------------------------------------------------------------------
+    // State
+    // -----------------------------------------------------------------------
+
     DynamicObjectRejectionParamsCPU params_;
-    std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr> last_voxelmaps;  ///< most recent voxelmap generated by voxelize
 
-    std::vector<int> dynamic_voxels_indices;
+    /// Ring buffer of past voxelmaps (oldest → newest).
+    std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr> voxelmap_history_;
 
-    std::vector<Eigen::Vector4d> static_points;
-    std::vector<double> static_intensities;
-    std::vector<double> static_times;
+    std::vector<int> dynamic_voxels_indices_;
+    std::vector<int> dynamic_voxels_neighbor_indices_;
 
-    std::vector<Eigen::Vector4d> dynamic_points;
-    std::vector<double> dynamic_intensities;
-    std::vector<double> dynamic_times;
-
-    PreprocessedFrame::Ptr last_dynamic_frame;  ///< Last frame of dynamic-only points
-
-  
-    int recursive_level; // to keep track of the current level of recursion in the voxelmap hierarchy
-    std::vector<int> dynamic_voxels_neighbor_indices; // to store the indices of neighboring voxels for each dynamic voxel, used for boosting the dynamic score of neighboring voxels
-    std::unique_ptr<CloudCovarianceEstimation> covariance_estimation;
-    std::shared_ptr<PoseKalmanFilter> pose_kalman_filter; // for fusing IMU and SLAM pose estimates to get a more accurate odometry estimation
-
-
-    //clustering
-    // Cluster di voxel (indici)
-    std::vector<std::vector<int>> dynamic_voxel_clusters;
-
-    // Cluster di punti (output finale)
-    std::vector<std::vector<Eigen::Vector4d>> dynamic_point_clusters;
-
+    PreprocessedFrame::Ptr            last_dynamic_frame_;
+    std::shared_ptr<PoseKalmanFilter> pose_kalman_filter_;
+    std::unique_ptr<CloudCovarianceEstimation> covariance_estimation_;
 };
 
 }  // namespace glim
