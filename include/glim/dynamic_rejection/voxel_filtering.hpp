@@ -8,6 +8,7 @@
 
 #include <glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp>  // adjust path
 #include <glim/dynamic_rejection/bounding_box.hpp>
+#include <glim/dynamic_rejection/wall_bbox.hpp>
 
 namespace glim {
 
@@ -73,7 +74,8 @@ public:
     using Ptr      = std::shared_ptr<WallFilter>;
     using ConstPtr = std::shared_ptr<const WallFilter>;
 
-    explicit WallFilter(const WallFilterConfig& config = WallFilterConfig{});
+    explicit WallFilter(const WallFilterConfig& config = WallFilterConfig{},
+                        WallBBoxRegistry::Ptr bbox_registry = nullptr);
     ~WallFilter() = default;
 
     /**
@@ -121,6 +123,7 @@ private:
 
     WallFilterConfig  config_;
     mutable std::mt19937 rng_;
+    WallBBoxRegistry::Ptr bbox_registry_;
 };
 
 }  // namespace glim

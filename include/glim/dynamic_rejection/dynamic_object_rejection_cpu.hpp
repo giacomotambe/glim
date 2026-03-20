@@ -27,7 +27,7 @@ public:
     double w_shape;
     double w_neighbor;
     double w_occupancy;
-
+    double points_limit;
     // History
     double history_factor;
     int    frame_num_memory;

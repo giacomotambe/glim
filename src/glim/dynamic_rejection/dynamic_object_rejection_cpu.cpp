@@ -49,6 +49,7 @@ DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU() {
     w_neighbor               = config.param<double>("dynamic_object_rejection", "w_neighbor",               0.6);
     history_factor           = config.param<double>("dynamic_object_rejection", "history_factor",           0.5);
     frame_num_memory         = config.param<int>   ("dynamic_object_rejection", "frame_num_memory",         10);
+    points_limit             = config.param<double>("dynamic_object_rejection", "points_limit",       0.25);
 
     spdlog::debug("[dynamic_rejection] params loaded");
 }
@@ -189,7 +190,7 @@ void DynamicObjectRejectionCPU::score_voxels(
         }
 
         // Too few points to compare reliably — keep as static
-        if (cur.num_points < 10) {
+        if (cur.num_points/(current.voxel_resolution()*100) < params_.points_limit) {
             cur.is_dynamic    = false;
             cur.dynamic_score = 0.0;
             continue;

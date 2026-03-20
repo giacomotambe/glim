@@ -122,9 +122,11 @@ add_library(glim SHARED
   src/glim/dynamic_rejection/async_dynamic_object_rejection_cpu.cpp
   src/glim/dynamic_rejection/transformation_kalman_filter.cpp
   src/glim/dynamic_rejection/voxel_filtering.cpp
+  src/glim/dynamic_rejection/wall_bbox.cpp
   #src/glim/dynamic_rejection/dynamic_cluster_extractor.cpp
   # GPU-related
   ${GPU_SRCS}
+
 )
 target_include_directories(glim PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

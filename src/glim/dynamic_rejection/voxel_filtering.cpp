@@ -37,8 +37,8 @@ WallFilterConfig::~WallFilterConfig() {
 }
 
 // ---------------------------------------------------------------------------
-WallFilter::WallFilter(const WallFilterConfig& config)
-    : config_(config), rng_(std::random_device{}()) {}
+WallFilter::WallFilter(const WallFilterConfig& config, WallBBoxRegistry::Ptr bbox_registry)
+    : config_(config), rng_(std::random_device{}()), bbox_registry_(bbox_registry) {}
 
 // ---------------------------------------------------------------------------
 WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
@@ -121,11 +121,60 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
     // piano-parete vengono marcati con is_wall = true.
     // DynamicObjectRejectionCPU li skippera nel loop di dynamic scoring.
     // ------------------------------------------------------------------
-    result.num_wall_voxels = mark_wall_voxels(*voxelmap, nvox, result.wall_planes);
+    // result.num_wall_voxels = mark_wall_voxels(*voxelmap, nvox, result.wall_planes);
 
     spdlog::debug("[wall_filter] marked {}/{} voxels as walls",
                   result.num_wall_voxels, nvox);
 
+    
+    if (bbox_registry_ && !result.wall_planes.empty()) {
+        const std::vector<Eigen::Vector3d> all_centroids =
+            extract_centroids(*voxelmap, nvox);
+
+        std::vector<BoundingBox> wall_bboxes;
+        wall_bboxes.reserve(result.wall_planes.size());
+
+        for (const auto& plane : result.wall_planes) {
+            std::vector<Eigen::Vector3d> inliers;
+            for (const auto& c : all_centroids) {
+                if (plane.distance(c) < config_.ransac_inlier_threshold) {
+                    inliers.push_back(c);
+                }
+            }
+            spdlog::debug("[wall_filter] plane with {} inliers", inliers.size());
+            if (static_cast<int>(inliers.size()) >= config_.ransac_min_inliers) {
+                wall_bboxes.push_back(build_wall_bbox(inliers, plane));
+            }
+        }
+
+        
+        if (!wall_bboxes.empty()) {
+            bbox_registry_->update(wall_bboxes);
+            spdlog::debug("[wall_filter] bbox_registry updated with {} wall OBBs",
+                          wall_bboxes.size());
+        }
+    }
+    
+    if (bbox_registry_ && !bbox_registry_->bboxes().empty()) {
+        int registry_marked = 0;
+        for (int i = 0; i < nvox; ++i) {
+            auto& voxel = voxelmap->lookup_voxel(i);
+            if (voxel.is_wall) continue;
+
+            for (const auto& bbox : bbox_registry_->bboxes()) {
+                if (bbox.contains(voxel.mean)) {
+                    voxel.is_wall = true;
+                    ++registry_marked;
+                    break;
+                }
+            }
+        }
+        spdlog::debug("[wall_filter] registry marked additional {}/{} voxels as walls",
+                      registry_marked, nvox);
+        result.num_wall_voxels += registry_marked;
+    }
+
+    
     return result;
 }
 
@@ -298,56 +347,61 @@ int WallFilter::mark_wall_voxels(
 }
 
 
-
 BoundingBox WallFilter::build_wall_bbox(
     const std::vector<Eigen::Vector3d>& inlier_pts,
     const PlaneModel& plane) const
 {
-    // Costruisce una OBB orientata usando gli assi naturali del piano:
-    //   axis[0] = normale al piano (spessore della parete)
-    //   axis[1] = vettore orizzontale giacente sul piano (larghezza)
-    //   axis[2] = vettore verticale giacente sul piano (altezza)
+    if (inlier_pts.empty()) {
+        return BoundingBox(Eigen::Vector3d::Zero(),
+                           Eigen::Vector3d::Zero(),
+                           Eigen::Matrix3d::Identity());
+    }
 
-    // Asse normale (già normalizzato)
+    // Usa direttamente gli assi del piano senza normalizzare verso UnitZ
     const Eigen::Vector3d n = plane.normal.normalized();
 
-    // Asse verticale: componente di Z ortogonale a n
-    Eigen::Vector3d up = Eigen::Vector3d::UnitZ() - n.dot(Eigen::Vector3d::UnitZ()) * n;
-    if (up.norm() < 1e-6) {
-        // Piano orizzontale degenere — usa Y
-        up = Eigen::Vector3d::UnitY() - n.dot(Eigen::Vector3d::UnitY()) * n;
+    // Asse arbitrario non parallelo a n per costruire il frame
+    Eigen::Vector3d ref = Eigen::Vector3d::UnitX();
+    if (std::abs(n.dot(ref)) > 0.9) {
+        ref = Eigen::Vector3d::UnitY();
     }
-    up.normalize();
 
-    // Asse orizzontale = n × up
-    const Eigen::Vector3d right = n.cross(up).normalized();
+    // Gram-Schmidt: right ortogonale a n, up ortogonale a entrambi
+    const Eigen::Vector3d right = (ref - n.dot(ref) * n).normalized();
+    const Eigen::Vector3d up    = n.cross(right).normalized();
 
-    // Matrice di rotazione: colonne = assi locali
     Eigen::Matrix3d R;
     R.col(0) = n;
     R.col(1) = right;
     R.col(2) = up;
 
-    // Calcolo centroide
-    Eigen::Vector3d mean = Eigen::Vector3d::Zero();
-    for (const auto& p : inlier_pts) mean += p;
-    mean /= static_cast<double>(inlier_pts.size());
+    // ── Proietta tutti i centroidi nel frame locale ───────────────────────────
+    // Usiamo il primo punto come origine temporanea per stabilità numerica
+    const Eigen::Vector3d origin = inlier_pts[0];
 
-    // Proietta tutti i punti nel frame locale e trova min/max
     Eigen::Vector3d local_min( 1e9,  1e9,  1e9);
     Eigen::Vector3d local_max(-1e9, -1e9, -1e9);
+
     for (const auto& p : inlier_pts) {
-        const Eigen::Vector3d local = R.transpose() * (p - mean);
+        const Eigen::Vector3d local = R.transpose() * (p - origin);
         local_min = local_min.cwiseMin(local);
         local_max = local_max.cwiseMax(local);
     }
 
-    const Eigen::Vector3d size          = local_max - local_min;
-    const Eigen::Vector3d local_center  = 0.5 * (local_max + local_min);
-    const Eigen::Vector3d world_center  = R * local_center + mean;
+    // ── Dimensioni ────────────────────────────────────────────────────────────
+    Eigen::Vector3d size = local_max - local_min;
+
+    // Lo spessore lungo la normale (asse 0) è artificialmente piccolo
+    // perché i centroidi sono quasi complanari: imponiamo un minimo
+    size.x() = std::max(size.x(), config_.ransac_inlier_threshold * 2.0);
+
+    // ── Centro nel frame locale → mondo ──────────────────────────────────────
+    const Eigen::Vector3d local_center = 0.5 * (local_max + local_min);
+    const Eigen::Vector3d world_center = R * local_center + origin;
 
     return BoundingBox(size, world_center, R);
 }
+
 
 
 }  // namespace glim

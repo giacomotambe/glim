@@ -61,7 +61,7 @@ public:
     const std::vector<BoundingBox>& bboxes() const { return registry_; }
 
     /// Svuota il registro.
-    void clear();
+    // void clear();
 
 private:
     // -----------------------------------------------------------------------
@@ -76,6 +76,7 @@ private:
 
     static OBB    to_obb(const BoundingBox& bbox);
     static double project_obb(const OBB& obb, const Eigen::Vector3d& axis);
+    static double interval_overlap(double c1, double r1, double c2, double r2);
     static double intersection_volume(const OBB& a, const OBB& b);
     static double iou(const BoundingBox& a, const BoundingBox& b);
 

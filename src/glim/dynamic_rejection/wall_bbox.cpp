@@ -1,6 +1,6 @@
-#include "glim/dynamic_rejection/wall_bbox.hpp"
+#include <glim/dynamic_rejection/wall_bbox.hpp>
 #include <spdlog/spdlog.h>
-
+#include <glim/util/config.hpp>
 namespace glim {
 
 
@@ -22,6 +22,10 @@ WallBBoxRegistryConfig::WallBBoxRegistryConfig() {
 WallBBoxRegistry::WallBBoxRegistry(const WallBBoxRegistryConfig& config)
     : config_(config) {}
 
+
+WallBBoxRegistryConfig::~WallBBoxRegistryConfig() {
+    spdlog::debug("[wall_registry] WallBBoxRegistryConfig::~WallBBoxRegistryConfig");
+}
 // ---------------------------------------------------------------------------
 // update()
 // ---------------------------------------------------------------------------
@@ -31,6 +35,11 @@ void WallBBoxRegistry::update(const std::vector<BoundingBox>& new_bboxes) {
     std::vector<bool> matched(registry_.size(), false);
 
     for (const auto& incoming : new_bboxes) {
+        if (incoming.get_size() == Eigen::Vector3d::Zero()) {
+            continue;
+        }
+
+
         int    best_idx = -1;
         double best_iou  = config_.overlap_threshold;  // soglia minima
 
@@ -174,21 +183,40 @@ BoundingBox WallBBoxRegistry::merge(const BoundingBox& existing,
                                      const BoundingBox& incoming,
                                      double weight)
 {
-    // Media pesata su centro e dimensioni; per l'orientamento usiamo SLERP
-    // tra le quaternioni delle due rotazioni.
-    const Eigen::Vector3d new_center =
-        (1.0 - weight) * existing.get_center() + weight * incoming.get_center();
+    // Manteniamo il frame locale della bbox esistente (rotazione fissa)
+    const Eigen::Matrix3d& R    = existing.get_rotation();
+    const Eigen::Vector3d& c_ex = existing.get_center();
 
-    const Eigen::Vector3d new_size =
-        (1.0 - weight) * existing.get_size() + weight * incoming.get_size();
+    // Half extents della bbox esistente nel suo frame locale
+    const Eigen::Vector3d he_ex = existing.get_size() * 0.5;
 
-    // SLERP tra quaternioni
-    Eigen::Quaterniond q_exist(existing.get_rotation());
-    Eigen::Quaterniond q_new(incoming.get_rotation());
-    if (q_exist.dot(q_new) < 0.0) q_new.coeffs() = -q_new.coeffs();
-    const Eigen::Quaterniond q_merged = q_exist.slerp(weight, q_new);
+    // Trasforma il centro della incoming nel frame locale della existing
+    const Eigen::Vector3d c_in_local = R.transpose() * (incoming.get_center() - c_ex);
+    const Eigen::Vector3d he_in      = incoming.get_size() * 0.5;
 
-    return BoundingBox(new_size, new_center, q_merged.toRotationMatrix());
+    // Gli 8 vertici della incoming nel frame locale della existing
+    // (ruotiamo anche l'orientamento della incoming nel frame della existing)
+    const Eigen::Matrix3d R_in_local = R.transpose() * incoming.get_rotation();
+
+    Eigen::Vector3d local_min = -he_ex;
+    Eigen::Vector3d local_max =  he_ex;
+
+    for (int sx : {-1, 1})
+    for (int sy : {-1, 1})
+    for (int sz : {-1, 1}) {
+        const Eigen::Vector3d corner_local =
+            R_in_local * Eigen::Vector3d(sx * he_in.x(),
+                                          sy * he_in.y(),
+                                          sz * he_in.z());
+        const Eigen::Vector3d v = c_in_local + corner_local;
+        local_min = local_min.cwiseMin(v);
+        local_max = local_max.cwiseMax(v);
+    }
+
+    // Nuove dimensioni e centro nel mondo
+    const Eigen::Vector3d new_size   = local_max - local_min;
+    const Eigen::Vector3d new_center = c_ex + R * (0.5 * (local_max + local_min));
+
+    return BoundingBox(new_size, new_center, R);
 }
-
 }  // namespace glim
