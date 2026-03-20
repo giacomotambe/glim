@@ -7,6 +7,7 @@
 #include <Eigen/Dense>
 
 #include <glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp>  // adjust path
+#include <glim/dynamic_rejection/bounding_box.hpp>
 
 namespace glim {
 
@@ -114,6 +115,9 @@ private:
     int mark_wall_voxels(gtsam_points::DynamicVoxelMapCPU& voxelmap,
                           int nvox,
                           const std::vector<PlaneModel>& wall_planes) const;
+                
+    BoundingBox build_wall_bbox(const std::vector<Eigen::Vector3d>& inlier_pts,
+                                const PlaneModel& plane) const;
 
     WallFilterConfig  config_;
     mutable std::mt19937 rng_;

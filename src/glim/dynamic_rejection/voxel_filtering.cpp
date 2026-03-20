@@ -297,4 +297,57 @@ int WallFilter::mark_wall_voxels(
     return count;
 }
 
+
+
+BoundingBox WallFilter::build_wall_bbox(
+    const std::vector<Eigen::Vector3d>& inlier_pts,
+    const PlaneModel& plane) const
+{
+    // Costruisce una OBB orientata usando gli assi naturali del piano:
+    //   axis[0] = normale al piano (spessore della parete)
+    //   axis[1] = vettore orizzontale giacente sul piano (larghezza)
+    //   axis[2] = vettore verticale giacente sul piano (altezza)
+
+    // Asse normale (già normalizzato)
+    const Eigen::Vector3d n = plane.normal.normalized();
+
+    // Asse verticale: componente di Z ortogonale a n
+    Eigen::Vector3d up = Eigen::Vector3d::UnitZ() - n.dot(Eigen::Vector3d::UnitZ()) * n;
+    if (up.norm() < 1e-6) {
+        // Piano orizzontale degenere — usa Y
+        up = Eigen::Vector3d::UnitY() - n.dot(Eigen::Vector3d::UnitY()) * n;
+    }
+    up.normalize();
+
+    // Asse orizzontale = n × up
+    const Eigen::Vector3d right = n.cross(up).normalized();
+
+    // Matrice di rotazione: colonne = assi locali
+    Eigen::Matrix3d R;
+    R.col(0) = n;
+    R.col(1) = right;
+    R.col(2) = up;
+
+    // Calcolo centroide
+    Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+    for (const auto& p : inlier_pts) mean += p;
+    mean /= static_cast<double>(inlier_pts.size());
+
+    // Proietta tutti i punti nel frame locale e trova min/max
+    Eigen::Vector3d local_min( 1e9,  1e9,  1e9);
+    Eigen::Vector3d local_max(-1e9, -1e9, -1e9);
+    for (const auto& p : inlier_pts) {
+        const Eigen::Vector3d local = R.transpose() * (p - mean);
+        local_min = local_min.cwiseMin(local);
+        local_max = local_max.cwiseMax(local);
+    }
+
+    const Eigen::Vector3d size          = local_max - local_min;
+    const Eigen::Vector3d local_center  = 0.5 * (local_max + local_min);
+    const Eigen::Vector3d world_center  = R * local_center + mean;
+
+    return BoundingBox(size, world_center, R);
+}
+
+
 }  // namespace glim
