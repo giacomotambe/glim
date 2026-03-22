@@ -89,7 +89,7 @@ private:
     ConcurrentVector<glim::PreprocessedFrame::Ptr> output_frame_queue;
     ConcurrentVector<glim::PreprocessedFrame::Ptr> dynamic_frame_queue;
     ConcurrentVector<WallFilterResult>             wall_result_queue;
-    ConcurrentVector<std::vector<BoundingBox>>    cluster_bbox_queue;
+    ConcurrentVector<std::vector<BoundingBox>>    cluster_bbox_queue_;
 
     std::shared_ptr<DynamicObjectRejectionCPU> dynamic_rejection_;
     std::shared_ptr<WallFilter>                wall_filter_;

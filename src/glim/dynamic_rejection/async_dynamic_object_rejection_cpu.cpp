@@ -56,7 +56,7 @@ std::vector<WallFilterResult> AsyncDynamicObjectRejection::get_wall_results() {
 }
 
 std::vector<std::vector<BoundingBox>> AsyncDynamicObjectRejection::get_cluster_bbox_results() {
-    return cluster_bbox_queue.get_all_and_clear();
+    return cluster_bbox_queue_.get_all_and_clear();
 }
 
 void AsyncDynamicObjectRejection::run() {
@@ -78,8 +78,13 @@ void AsyncDynamicObjectRejection::run() {
             // Step 1: WallFilter — voxelize + mark wall voxels
             // ------------------------------------------------------------------
             const WallFilterResult wf = wall_filter_->filter(*frame);
-            const std::vector<BoundingBox> bboxes = cluster_extractor_->extract_clusters(wf.voxelmap);
-            spdlog::debug("[dynamic_rejection][async] found {} cluster bounding boxes", bboxes.size());
+            
+            DynamicClusterExtractor::ClusterMap cluster_map;
+ 
+            if (cluster_extractor_ && wf.voxelmap) {
+                cluster_map = cluster_extractor_->cluster_voxels(wf.voxelmap);
+                spdlog::debug("[dynamic_rejection][async] cluster_map size={}", cluster_map.size());
+            }
 
             // ------------------------------------------------------------------
             // Step 2: DynamicObjectRejection — score non-wall voxels
@@ -90,6 +95,54 @@ void AsyncDynamicObjectRejection::run() {
             // ------------------------------------------------------------------
             // Enqueue outputs
             // ------------------------------------------------------------------
+
+            if (cluster_extractor_ && wf.voxelmap && !cluster_map.empty()) {
+                // Conta il numero di cluster dalla mappa
+                int num_clusters = 0;
+                for (int cid : cluster_map)
+                    if (cid >= 0) num_clusters = std::max(num_clusters, cid + 1);
+ 
+                if (num_clusters > 0) {
+                    // Raccoglie i punti solo dei cluster dinamici
+                    // (almeno un voxel del cluster ha is_dynamic == true
+                    //  dopo la propagazione)
+                    const int nvox = static_cast<int>(cluster_map.size());
+                    std::vector<bool> cluster_is_dynamic(num_clusters, false);
+                    for (int i = 0; i < nvox; ++i) {
+                        const int cid = cluster_map[i];
+                        if (cid >= 0 && wf.voxelmap->lookup_voxel(i).is_dynamic)
+                            cluster_is_dynamic[cid] = true;
+                    }
+ 
+                    // Costruisce point_clusters solo per i cluster dinamici
+                    std::vector<std::vector<Eigen::Vector4d>> dyn_point_clusters(num_clusters);
+                    for (int i = 0; i < nvox; ++i) {
+                        const int cid = cluster_map[i];
+                        if (cid >= 0 && cluster_is_dynamic[cid]) {
+                            const auto& vox = wf.voxelmap->lookup_voxel(i);
+                            dyn_point_clusters[cid].insert(
+                                dyn_point_clusters[cid].end(),
+                                vox.voxel_points.begin(),
+                                vox.voxel_points.end());
+                        }
+                    }
+ 
+                    // Rimuove cluster vuoti (statici) e calcola OBB
+                    dyn_point_clusters.erase(
+                        std::remove_if(dyn_point_clusters.begin(), dyn_point_clusters.end(),
+                            [](const std::vector<Eigen::Vector4d>& c){ return c.empty(); }),
+                        dyn_point_clusters.end());
+ 
+                    auto bboxes = cluster_extractor_->compute_bounding_boxes(dyn_point_clusters);
+ 
+                    if (!bboxes.empty()) {
+                        cluster_bbox_queue_.push_back(std::move(bboxes));
+                        spdlog::debug("[dynamic_rejection][async] {} dynamic cluster bboxes enqueued",
+                                      cluster_bbox_queue_.size());
+                    }
+                }
+            }
+            wall_result_queue.push_back(wf);
             output_frame_queue.push_back(dr.static_frame);
 
             if (dr.dynamic_frame) {
@@ -99,12 +152,7 @@ void AsyncDynamicObjectRejection::run() {
             // Always enqueue the wall result so the caller can publish wall
             // voxels even when no wall planes were found (num_wall_voxels == 0).
 
-            if (!bboxes.empty()) {
-                cluster_bbox_queue.push_back(std::move(bboxes));
-                spdlog::debug("[dynamic_rejection][async] {} dynamic cluster bboxes enqueued",
-                                cluster_bbox_queue.size());
-            }
-            wall_result_queue.push_back(wf);
+            
             
             spdlog::debug("[dynamic_rejection][async] frame done: "
                           "wall_voxels={}/{} static_pts={} dynamic_pts={}",
