@@ -47,13 +47,17 @@ DynamicClusterExtractor::DynamicClusterExtractor(
 std::vector<BoundingBox> DynamicClusterExtractor::extract_clusters(
     gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap) const
 {
-    spdlog::info("[cluster_extractor] extract_clusters begin");
     const auto cluster_map = cluster_voxels(voxelmap);
 
-    const auto clusters = build_point_clusters(voxelmap, cluster_map, params_.min_cluster_voxels);
-    spdlog::info("[cluster_extractor] {} clusters found", clusters.size());
+    // Calcola il numero reale di cluster
+    int num_clusters = 0;
+    for (int id : cluster_map) {
+        if (id >= num_clusters) num_clusters = id + 1;
+    }
+    spdlog::debug("[cluster_extractor] found {} clusters", num_clusters);
+    const auto clusters = build_point_clusters(voxelmap, cluster_map, num_clusters);
     return compute_bounding_boxes(clusters);
-}    
+}
 // ===========================================================================
 // cluster_voxels()
 //

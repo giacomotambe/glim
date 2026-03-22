@@ -55,6 +55,10 @@ std::vector<WallFilterResult> AsyncDynamicObjectRejection::get_wall_results() {
     return wall_result_queue.get_all_and_clear();
 }
 
+std::vector<std::vector<BoundingBox>> AsyncDynamicObjectRejection::get_cluster_bbox_results() {
+    return cluster_bbox_queue.get_all_and_clear();
+}
+
 void AsyncDynamicObjectRejection::run() {
     spdlog::debug("[dynamic_rejection][async] thread started");
 
@@ -75,12 +79,14 @@ void AsyncDynamicObjectRejection::run() {
             // ------------------------------------------------------------------
             const WallFilterResult wf = wall_filter_->filter(*frame);
             const std::vector<BoundingBox> bboxes = cluster_extractor_->extract_clusters(wf.voxelmap);
+            spdlog::debug("[dynamic_rejection][async] found {} cluster bounding boxes", bboxes.size());
+
             // ------------------------------------------------------------------
             // Step 2: DynamicObjectRejection — score non-wall voxels
             // ------------------------------------------------------------------
             const DynamicRejectionResult dr =
                 dynamic_rejection_->reject(wf, frame);
-
+            
             // ------------------------------------------------------------------
             // Enqueue outputs
             // ------------------------------------------------------------------
@@ -92,10 +98,14 @@ void AsyncDynamicObjectRejection::run() {
 
             // Always enqueue the wall result so the caller can publish wall
             // voxels even when no wall planes were found (num_wall_voxels == 0).
-            wall_result_queue.push_back(wf);
-            for (const auto& bbox : bboxes) {
-                cluster_bbox_queue.push_back(bbox);
+
+            if (!bboxes.empty()) {
+                cluster_bbox_queue.push_back(std::move(bboxes));
+                spdlog::debug("[dynamic_rejection][async] {} dynamic cluster bboxes enqueued",
+                                cluster_bbox_queue.size());
             }
+            wall_result_queue.push_back(wf);
+            
             spdlog::debug("[dynamic_rejection][async] frame done: "
                           "wall_voxels={}/{} static_pts={} dynamic_pts={}",
                 wf.num_wall_voxels,

@@ -75,9 +75,7 @@ public:
     }
 
     /// Drain and return the most recent cluster bounding boxes.
-    std::vector<BoundingBox> get_last_cluster_bboxes() {
-        return cluster_bbox_queue.get_all_and_clear();
-    }
+    std::vector<std::vector<BoundingBox>> get_cluster_bbox_results();
 
 private:
     void run();
@@ -91,7 +89,7 @@ private:
     ConcurrentVector<glim::PreprocessedFrame::Ptr> output_frame_queue;
     ConcurrentVector<glim::PreprocessedFrame::Ptr> dynamic_frame_queue;
     ConcurrentVector<WallFilterResult>             wall_result_queue;
-    ConcurrentVector<BoundingBox>                  cluster_bbox_queue;
+    ConcurrentVector<std::vector<BoundingBox>>    cluster_bbox_queue;
 
     std::shared_ptr<DynamicObjectRejectionCPU> dynamic_rejection_;
     std::shared_ptr<WallFilter>                wall_filter_;
