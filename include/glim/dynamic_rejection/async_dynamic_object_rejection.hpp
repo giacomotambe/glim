@@ -8,6 +8,9 @@
 #include <glim/dynamic_rejection/voxel_filtering.hpp>
 #include <glim/util/concurrent_vector.hpp>
 #include <glim/preprocess/preprocessed_frame.hpp>
+#include <glim/dynamic_rejection/bounding_box.hpp>
+#include <glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp>
+#include <glim/dynamic_rejection/dynamic_cluster_extractor.hpp>
 
 namespace glim {
 
@@ -26,6 +29,7 @@ namespace glim {
  * The background thread executes for each frame:
  *   1. wall_filter_->filter(*frame)          — voxelize + mark wall voxels
  *   2. dynamic_rejection_->reject(wf, frame) — score + split points
+ *   3. cluster_extractor_->extract_clusters(wf.voxelmap) — extract dynamic clusters
  *
  * Results are retrieved from the caller's thread at any time:
  *   auto static_frames  = async.get_results();
@@ -36,10 +40,12 @@ public:
     /**
      * @param dynamic_rejection  Scorer (DynamicObjectRejectionCPU).
      * @param wall_filter        Voxelizer + wall marker (WallFilter).
+     * @param cluster_extractor  Extractor for dynamic clusters (DynamicClusterExtractor).
      */
     AsyncDynamicObjectRejection(
         const std::shared_ptr<DynamicObjectRejectionCPU>& dynamic_rejection,
-        const std::shared_ptr<WallFilter>&                wall_filter);
+        const std::shared_ptr<WallFilter>&                wall_filter,
+        const std::shared_ptr<DynamicClusterExtractor>&   cluster_extractor);
 
     ~AsyncDynamicObjectRejection();
 
@@ -68,6 +74,11 @@ public:
         return dynamic_rejection_->get_last_voxelmap();
     }
 
+    /// Drain and return the most recent cluster bounding boxes.
+    std::vector<BoundingBox> get_last_cluster_bboxes() {
+        return cluster_bbox_queue.get_all_and_clear();
+    }
+
 private:
     void run();
 
@@ -80,9 +91,11 @@ private:
     ConcurrentVector<glim::PreprocessedFrame::Ptr> output_frame_queue;
     ConcurrentVector<glim::PreprocessedFrame::Ptr> dynamic_frame_queue;
     ConcurrentVector<WallFilterResult>             wall_result_queue;
+    ConcurrentVector<BoundingBox>                  cluster_bbox_queue;
 
     std::shared_ptr<DynamicObjectRejectionCPU> dynamic_rejection_;
     std::shared_ptr<WallFilter>                wall_filter_;
+    std::shared_ptr<DynamicClusterExtractor>   cluster_extractor_;
 };
 
 }  // namespace glim

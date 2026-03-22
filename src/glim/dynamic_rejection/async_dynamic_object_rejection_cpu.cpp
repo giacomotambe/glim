@@ -5,9 +5,11 @@ namespace glim {
 
 AsyncDynamicObjectRejection::AsyncDynamicObjectRejection(
     const std::shared_ptr<DynamicObjectRejectionCPU>& dynamic_rejection,
-    const std::shared_ptr<WallFilter>&                wall_filter)
+    const std::shared_ptr<WallFilter>&                wall_filter,
+    const std::shared_ptr<DynamicClusterExtractor>&   cluster_extractor)
   : dynamic_rejection_(dynamic_rejection),
-    wall_filter_(wall_filter)
+    wall_filter_(wall_filter),
+    cluster_extractor_(cluster_extractor)
 {
     spdlog::debug("[dynamic_rejection][async] ctor");
     kill_switch     = false;
@@ -72,7 +74,7 @@ void AsyncDynamicObjectRejection::run() {
             // Step 1: WallFilter — voxelize + mark wall voxels
             // ------------------------------------------------------------------
             const WallFilterResult wf = wall_filter_->filter(*frame);
-
+            const std::vector<BoundingBox> bboxes = cluster_extractor_->extract_clusters(wf.voxelmap);
             // ------------------------------------------------------------------
             // Step 2: DynamicObjectRejection — score non-wall voxels
             // ------------------------------------------------------------------
@@ -91,7 +93,9 @@ void AsyncDynamicObjectRejection::run() {
             // Always enqueue the wall result so the caller can publish wall
             // voxels even when no wall planes were found (num_wall_voxels == 0).
             wall_result_queue.push_back(wf);
-
+            for (const auto& bbox : bboxes) {
+                cluster_bbox_queue.push_back(bbox);
+            }
             spdlog::debug("[dynamic_rejection][async] frame done: "
                           "wall_voxels={}/{} static_pts={} dynamic_pts={}",
                 wf.num_wall_voxels,
