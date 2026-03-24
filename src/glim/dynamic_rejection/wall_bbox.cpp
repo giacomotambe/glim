@@ -20,7 +20,10 @@ WallBBoxRegistryConfig::WallBBoxRegistryConfig() {
 
 
 WallBBoxRegistry::WallBBoxRegistry(const WallBBoxRegistryConfig& config)
-    : config_(config) {}
+    : config_(config) {
+        registry_.clear();
+        missed_frames_.clear();
+    }
 
 
 WallBBoxRegistryConfig::~WallBBoxRegistryConfig() {

@@ -47,6 +47,7 @@ struct WallFilterConfig {
     int    ransac_min_inliers;
     double ransac_confidence;
     double wall_vertical_angle_deg;
+    double floor_ceiling_angle_deg;
     int    max_planes;
 
     WallFilterConfig();   // reads from config file
@@ -111,6 +112,8 @@ private:
     bool ransac_once(std::vector<Eigen::Vector3d>& pts, PlaneModel& best_plane);
 
     bool is_wall_plane(const PlaneModel& plane) const;
+
+    bool is_floor_ceiling_plane(const PlaneModel& plane) const;
 
     /// Marca i voxel della voxelmap il cui centroide cade su uno dei piani-parete.
     /// Restituisce il numero di voxel marcati.

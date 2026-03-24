@@ -25,6 +25,7 @@ WallFilterConfig::WallFilterConfig() {
     ransac_confidence       = config.param<double>("wall_filter", "ransac_confidence",       0.99);
     wall_vertical_angle_deg = config.param<double>("wall_filter", "wall_vertical_angle_deg", 20.0);
     max_planes              = config.param<int>   ("wall_filter", "max_planes",              8);
+    floor_ceiling_angle_deg = config.param<double>("wall_filter", "floor_ceiling_angle_deg", 2.0);
 
     spdlog::debug("[wall_filter] WallFilterConfig: res={} ransac_iter={} thresh={} min_inliers={} "
                   "conf={} angle_deg={} max_planes={}",
@@ -102,7 +103,7 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
     // Step 4 – Classifica i piani come parete o pavimento/soffitto
     // ------------------------------------------------------------------
     for (const auto& plane : all_planes) {
-        if (is_wall_plane(plane)) {
+        if (is_wall_plane(plane) || is_floor_ceiling_plane(plane)) {
             result.wall_planes.push_back(plane);
             spdlog::debug("[wall_filter] wall plane: normal=({:.2f},{:.2f},{:.2f})",
                           plane.normal.x(), plane.normal.y(), plane.normal.z());
@@ -114,6 +115,8 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
     if (result.wall_planes.empty()) {
         return result;
     }
+
+
 
     // ------------------------------------------------------------------
     // Step 5 – Marca i voxel-parete nella voxelmap
@@ -164,6 +167,8 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
             for (const auto& bbox : bbox_registry_->bboxes()) {
                 if (bbox.contains(voxel.mean)) {
                     voxel.is_wall = true;
+                    auto coord = voxelmap->voxel_coord(voxel.mean);
+                    spdlog::debug("[wall_filter] voxel coordinates [{}, {}, {}]", coord.x(), coord.y(), coord.z());
                     ++registry_marked;
                     break;
                 }
@@ -322,6 +327,14 @@ bool WallFilter::is_wall_plane(const PlaneModel& plane) const {
     //                  → |normal.z| < sin(wall_vertical_angle_deg)
     const double sin_thr = std::sin(config_.wall_vertical_angle_deg * M_PI / 180.0);
     return std::abs(plane.normal.z()) < sin_thr;
+}
+
+bool WallFilter::is_floor_ceiling_plane(const PlaneModel& plane) const {
+    // Pavimento/soffitto → normale quasi verticale → |normal.z| vicino a 1
+    // Condizione: angolo tra normale e asse Z < floor_ceiling_angle_deg
+    //           → |normal.z| > cos(floor_ceiling_angle_deg)
+    const double cos_thr = std::cos(config_.floor_ceiling_angle_deg * M_PI / 180.0);
+    return std::abs(plane.normal.z()) > cos_thr;
 }
 
 // ---------------------------------------------------------------------------

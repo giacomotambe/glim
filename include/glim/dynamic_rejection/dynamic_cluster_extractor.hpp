@@ -13,9 +13,6 @@ namespace glim {
 
 // ===========================================================================
 // DynamicClusterExtractorParams
-//
-// Stesso pattern di DynamicObjectRejectionParamsCPU: il costruttore legge
-// dal file "config_dynamic_cluster_extractor" tramite glim::Config.
 // ===========================================================================
 struct DynamicClusterExtractorParams {
 public:
@@ -47,26 +44,36 @@ public:
     /// Numero minimo di punti raw per generare una bounding box.
     /// Default: 20
     int min_points_for_bbox;
+
+    // --- Filtro dimensionale sulle bounding box ---
+
+    /// Dimensione minima ammessa lungo ciascun asse dell'OBB [m].
+    /// Un'OBB viene scartata se il suo lato più corto è < bbox_min_extent.
+    /// Utile per eliminare cluster rumorosi troppo piccoli.
+    /// Default: 0.0  (nessun filtro)
+    double bbox_min_extent;
+
+    /// Dimensione massima ammessa lungo ciascun asse dell'OBB [m].
+    /// Un'OBB viene scartata se il suo lato più lungo è > bbox_max_extent.
+    /// Utile per eliminare falsi positivi enormi (es. muri non classificati).
+    /// Default: 1e9  (nessun filtro)
+    double bbox_max_extent;
+
+    /// Volume minimo ammesso [m³].
+    /// Default: 0.0  (nessun filtro)
+    double bbox_min_volume;
+
+    /// Volume massimo ammesso [m³].
+    /// Default: 1e9  (nessun filtro)
+    double bbox_max_volume;
 };
 
 // ===========================================================================
 // DynamicClusterExtractor
-//
-// Uso nella pipeline (chiamato PRIMA di DynamicObjectRejectionCPU::reject()):
-//
-//   WallFilterResult wf       = wall_filter.filter(frame);
-//   ClusterMap       cmap     = extractor.cluster_voxels(wf.voxelmap);
-//   DynamicRejectionResult dr = rejector.reject(wf, frame, cmap);
-//
-// cluster_map[voxel_id]:
-//   >= 0  → ID del cluster a cui appartiene il voxel
-//   == -1 → voxel wall oppure NOISE DBSCAN (non appartiene a nessun cluster)
 // ===========================================================================
 class DynamicClusterExtractor {
 public:
     using VoxelMapPtr = gtsam_points::DynamicVoxelMapCPU::Ptr;
-
-    /// cluster_map[voxel_id] = cluster_id  (-1 → wall / NOISE)
     using ClusterMap  = std::vector<int>;
 
     DynamicClusterExtractor();
@@ -75,33 +82,24 @@ public:
 
     /**
      * @brief  DBSCAN sui centroidi dei voxel NON-wall.
-     *
-     * Salta i voxel con is_wall == true (cluster_map[i] = -1 per loro).
-     * Restituisce un vettore di dimensione num_voxels():
-     *   cluster_map[i] >= 0  → cluster ID
-     *   cluster_map[i] == -1 → wall o NOISE
-     *
-     * @param voxelmap  Output di WallFilter::filter() con is_wall marcato.
-     * @return          ClusterMap indicizzata per voxel_id globale.
      */
     ClusterMap cluster_voxels(gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap) const;
 
     // -----------------------------------------------------------------------
-    // Utilities post-rejection (per visualizzazione / bbox)
+    // Utilities post-rejection
     // -----------------------------------------------------------------------
 
-    /// Raccoglie i punti raw di ogni cluster dalla voxelmap.
-    /// num_clusters = valore massimo in cluster_map + 1.
     std::vector<std::vector<Eigen::Vector4d>> build_point_clusters(
         VoxelMapPtr       voxelmap,
         const ClusterMap& cluster_map,
         int               num_clusters) const;
 
-    /// Genera OBB per ogni cluster con abbastanza punti (usa params_.min_points_for_bbox).
+    /// Genera OBB per ogni cluster con abbastanza punti, applicando i filtri
+    /// dimensionali configurati (bbox_min/max_extent, bbox_min/max_volume).
     std::vector<BoundingBox> compute_bounding_boxes(
         const std::vector<std::vector<Eigen::Vector4d>>& clusters) const;
 
-    /// Overload con soglia esplicita.
+    /// Overload con soglia minima punti esplicita (usa comunque i filtri dimensionali).
     std::vector<BoundingBox> compute_bounding_boxes(
         const std::vector<std::vector<Eigen::Vector4d>>& clusters,
         int min_points) const;
@@ -111,7 +109,10 @@ public:
     std::vector<BoundingBox> extract_clusters(gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap) const;
 
 private:
-    BoundingBox createOBB(const std::vector<Eigen::Vector4d>& cluster) const;
+    /// Crea l'OBB per un singolo cluster.  Ritorna true se l'OBB supera i
+    /// filtri dimensionali configurati, false se deve essere scartata.
+    bool createOBB(const std::vector<Eigen::Vector4d>& cluster,
+                   BoundingBox& out_bbox) const;
 
 private:
     DynamicClusterExtractorParams params_;
