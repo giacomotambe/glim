@@ -31,5 +31,15 @@ bool BoundingBox::contains(const Eigen::Vector4d& point) const {
             std::abs(local_p.y()) <= half_size.y() &&
             std::abs(local_p.z()) <= half_size.z());
 }
+
+
+void BoundingBox::transform(const Eigen::Isometry3d& T) {
+    // Aggiorna centro e rotazione
+    center = T * center;
+    rotation = T.linear() * rotation;
+
+    // Aggiorna la matrice inversa per contains()
+    R_inv = rotation.transpose();
 }
 
+}  // namespace glim

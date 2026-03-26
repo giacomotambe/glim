@@ -27,6 +27,13 @@ struct WallBBoxRegistryConfig {
     bool enable_expiry;
     int  max_missed_frames;
 
+    /// Soglia minima per il prodotto scalare tra le normali di due box
+    /// affinché siano considerate per la fusione (evita di fondere box con
+    /// orientamenti molto diversi).
+    double min_normal_dot;
+    double max_center_distance;
+
+
     WallBBoxRegistryConfig();
     ~WallBBoxRegistryConfig();    
 };
@@ -55,10 +62,19 @@ public:
         const WallBBoxRegistryConfig& config = WallBBoxRegistryConfig{});
 
     /// Confronta le nuove OBB con il registro e aggiorna (fonde o aggiunge).
-    void update(const std::vector<BoundingBox>& new_bboxes);
+    void update(const std::vector<BoundingBox>& new_bboxes, const Eigen::Isometry3d& delta_pose);
 
     /// Registro corrente di bounding box di pareti (lettura).
     const std::vector<BoundingBox>& bboxes() const { return registry_; }
+
+    /// Rimuove le box vuote (size == 0) dal registro.
+    void clear_empty_bboxes();
+
+    /// Rimuove le box che non sono state osservate per più di max_missed_frames.
+    void remove_expired(const std::vector<bool>& empty_bboxes);
+
+    /// Svuota completamente il registro.
+    void clear() { registry_.clear(); missed_frames_.clear(); }
 
     /// Svuota il registro.
     // void clear();
@@ -79,6 +95,7 @@ private:
     static double interval_overlap(double c1, double r1, double c2, double r2);
     static double intersection_volume(const OBB& a, const OBB& b);
     static double iou(const BoundingBox& a, const BoundingBox& b);
+    void transform_existing_bboxes(const Eigen::Isometry3d& delta_pose);
 
     // -----------------------------------------------------------------------
     // Merge

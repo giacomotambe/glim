@@ -12,10 +12,12 @@
 
 namespace glim {
 
+class PoseKalmanFilter;
 
 WallFilterConfig::WallFilterConfig() {
     spdlog::debug("[wall_filter] WallFilterConfig::WallFilterConfig begin");
     Config config(GlobalConfig::get_config_path("config_wall_filter"));
+    Config sensor_config(GlobalConfig::get_config_path("config_sensors"));
 
     // voxel resolution must match odometry to reuse the same voxelmap
     voxel_resolution        = config.param<double>("wall_filter", "voxel_resolution",        0.5);
@@ -27,6 +29,10 @@ WallFilterConfig::WallFilterConfig() {
     max_planes              = config.param<int>   ("wall_filter", "max_planes",              8);
     floor_ceiling_angle_deg = config.param<double>("wall_filter", "floor_ceiling_angle_deg", 2.0);
 
+
+
+    T_lidar_imu = sensor_config.param<Eigen::Isometry3d>("sensors", "T_lidar_imu", Eigen::Isometry3d::Identity());
+    T_imu_lidar = T_lidar_imu.inverse();
     spdlog::debug("[wall_filter] WallFilterConfig: res={} ransac_iter={} thresh={} min_inliers={} "
                   "conf={} angle_deg={} max_planes={}",
                   voxel_resolution, ransac_max_iterations, ransac_inlier_threshold,
@@ -38,8 +44,8 @@ WallFilterConfig::~WallFilterConfig() {
 }
 
 // ---------------------------------------------------------------------------
-WallFilter::WallFilter(const WallFilterConfig& config, WallBBoxRegistry::Ptr bbox_registry)
-    : config_(config), rng_(std::random_device{}()), bbox_registry_(bbox_registry) {}
+WallFilter::WallFilter(const WallFilterConfig& config, WallBBoxRegistry::Ptr bbox_registry,const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter)
+    : config_(config), rng_(std::random_device{}()), bbox_registry_(bbox_registry), pose_kalman_filter_(pose_kalman_filter), last_pose_(Eigen::Isometry3d::Identity()) {}
 
 // ---------------------------------------------------------------------------
 WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
@@ -152,20 +158,35 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
 
         
         if (!wall_bboxes.empty()) {
-            bbox_registry_->update(wall_bboxes);
+            Eigen::Isometry3d T_delta_pose = Eigen::Isometry3d::Identity();
+            if (pose_kalman_filter_) {
+                
+                Eigen::Isometry3d T_world_imu =  pose_kalman_filter_->getPose(); // Inverti per trasformare dal vecchio al nuovo frame
+                T_delta_pose = last_pose_.inverse() * T_world_imu; // Delta tra il vecchio e il nuovo frame
+                last_pose_ = T_world_imu; // Aggiorna il last_pose_ con il nuovo frame
+                spdlog::info("[wall_filter] obtained delta pose from Kalman filter: translation=({:.4f},{:.4f},{:.4f})",
+                              T_delta_pose.translation().x(), T_delta_pose.translation().y(), T_delta_pose.translation().z());
+
+            }
+            bbox_registry_->update(wall_bboxes,T_delta_pose.inverse()); // Passa l'inverso del delta pose per trasformare le bbox dal nuovo al vecchio frame
             spdlog::debug("[wall_filter] bbox_registry updated with {} wall OBBs",
                           wall_bboxes.size());
         }
     }
-    
+
+    std::vector<bool> empty_bboxes;
     if (bbox_registry_ && !bbox_registry_->bboxes().empty()) {
+        empty_bboxes.assign(bbox_registry_->bboxes().size(), true);
+
         int registry_marked = 0;
         for (int i = 0; i < nvox; ++i) {
             auto& voxel = voxelmap->lookup_voxel(i);
             if (voxel.is_wall) continue;
 
-            for (const auto& bbox : bbox_registry_->bboxes()) {
+            for (size_t j = 0; j < bbox_registry_->bboxes().size(); ++j) {
+                const auto& bbox = bbox_registry_->bboxes()[j];
                 if (bbox.contains(voxel.mean)) {
+                    empty_bboxes[j] = false;
                     voxel.is_wall = true;
                     auto coord = voxelmap->voxel_coord(voxel.mean);
                     spdlog::debug("[wall_filter] voxel coordinates [{}, {}, {}]", coord.x(), coord.y(), coord.z());
@@ -179,7 +200,8 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
         result.num_wall_voxels += registry_marked;
     }
 
-    
+   // if (bbox_registry_) bbox_registry_->remove_expired(empty_bboxes);
+
     return result;
 }
 
@@ -414,7 +436,6 @@ BoundingBox WallFilter::build_wall_bbox(
 
     return BoundingBox(size, world_center, R);
 }
-
 
 
 }  // namespace glim

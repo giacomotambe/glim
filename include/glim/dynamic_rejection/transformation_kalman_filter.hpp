@@ -36,6 +36,8 @@ public:
 
   /// Return the current accumulated relative transform (T_{k-1 -> k})
   Eigen::Isometry3d getDeltaPose() const;
+  
+  Eigen::Isometry3d getPose() const;
 
 
   /// Return the current velocity estimate
@@ -63,6 +65,8 @@ private:
   Eigen::Vector3d delta_position_;
   Eigen::Vector3d velocity_;
   Eigen::Quaterniond delta_orientation_;
+  Eigen::Isometry3d last_filtered_pose_;  // T_world_imu at last SLAM update (for delta computation)
+  Eigen::Isometry3d T_delta;
 
   // Orientation at the start of the current interval (for rotating acc to local-level frame)
   Eigen::Quaterniond orientation_at_reset_;

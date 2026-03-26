@@ -1,6 +1,7 @@
 #include <glim/dynamic_rejection/wall_bbox.hpp>
 #include <spdlog/spdlog.h>
 #include <glim/util/config.hpp>
+#include <Eigen/Eigenvalues>
 namespace glim {
 
 
@@ -12,6 +13,8 @@ WallBBoxRegistryConfig::WallBBoxRegistryConfig() {
     merge_weight     = config.param<double>("wall_registry", "merge_weight",     0.3);
     enable_expiry    = config.param<bool>  ("wall_registry", "enable_expiry",    false);
     max_missed_frames= config.param<int>   ("wall_registry", "max_missed_frames", 30);
+    min_normal_dot   = config.param<double>("wall_registry", "min_normal_dot",   0.9);
+    max_center_distance = config.param<double>("wall_registry", "max_center_distance", 5.0);
 
     spdlog::debug("[wall_registry] WallBBoxRegistryConfig: overlap_thresh={} merge_weight={} "
                   "enable_expiry={} max_missed_frames={}",
@@ -33,52 +36,66 @@ WallBBoxRegistryConfig::~WallBBoxRegistryConfig() {
 // update()
 // ---------------------------------------------------------------------------
 
-void WallBBoxRegistry::update(const std::vector<BoundingBox>& new_bboxes) {
-    // Marca tutti gli slot esistenti come "non visti in questo frame"
+void WallBBoxRegistry::update(const std::vector<BoundingBox>& new_bboxes , const Eigen::Isometry3d& delta_pose) {
+    spdlog::debug("[wall_registry] update: new_bboxes={}, delta_pose translation=({:.3f},{:.3f},{:.3f})",
+                  new_bboxes.size(), delta_pose.translation().x(), delta_pose.translation().y(), delta_pose.translation().z());
+    
+    transform_existing_bboxes(delta_pose);
     std::vector<bool> matched(registry_.size(), false);
 
     for (const auto& incoming : new_bboxes) {
-        if (incoming.get_size() == Eigen::Vector3d::Zero()) {
-            continue;
-        }
-
+        if (incoming.get_size() == Eigen::Vector3d::Zero()) continue;
 
         int    best_idx = -1;
-        double best_iou  = config_.overlap_threshold;  // soglia minima
+        double best_iou  = config_.overlap_threshold;
 
         for (int i = 0; i < static_cast<int>(registry_.size()); ++i) {
+            
+            // --- [NUOVO] Controlla che le due bbox abbiano la stessa normale
+            // La colonna 0 della rotation matrix è la normale al piano
+            const Eigen::Vector3d n_existing = registry_[i].get_rotation().col(0);
+            const Eigen::Vector3d n_incoming = incoming.get_rotation().col(0);
+            const double normal_dot = std::abs(n_existing.dot(n_incoming));
+            
+            // Se le normali sono troppo diverse, non sono lo stesso muro
+            if (normal_dot < config_.min_normal_dot) {
+                spdlog::debug("[wall_registry] skip merge: normal mismatch dot={:.3f}", normal_dot);
+                continue;
+            }
+
+            // --- [NUOVO] Controlla che i centri non siano troppo lontani
+            const double center_dist = (registry_[i].get_center() - incoming.get_center()).norm();
+            if (center_dist > config_.max_center_distance) {
+                spdlog::debug("[wall_registry] skip merge: centers too far {:.3f}m", center_dist);
+                continue;
+            }
+
             const double overlap = iou(registry_[i], incoming);
             if (overlap > best_iou) {
                 best_iou  = overlap;
                 best_idx  = i;
             }
         }
-
         if (best_idx >= 0) {
-            // Fusione con la box esistente
             registry_[best_idx] = merge(registry_[best_idx], incoming, config_.merge_weight);
             matched[best_idx]   = true;
             missed_frames_[best_idx] = 0;
             spdlog::debug("[wall_registry] merged bbox {}: IoU={:.3f}", best_idx, best_iou);
+        
         } else {
-            // Nuova parete mai vista prima
             registry_.push_back(incoming);
             missed_frames_.push_back(0);
             spdlog::debug("[wall_registry] added new bbox (total={})", registry_.size());
         }
     }
 
-    // Gestione expiry
     if (config_.enable_expiry) {
-        for (int i = 0; i < static_cast<int>(registry_.size()); ++i) {
+        for (int i = 0; i < static_cast<int>(registry_.size()); ++i)
             if (!matched[i]) ++missed_frames_[i];
-        }
 
-        // Rimuovi in ordine inverso per non invalidare gli indici
         for (int i = static_cast<int>(registry_.size()) - 1; i >= 0; --i) {
             if (missed_frames_[i] > config_.max_missed_frames) {
-                spdlog::debug("[wall_registry] expired bbox {} (missed {} frames)",
-                              i, missed_frames_[i]);
+                spdlog::debug("[wall_registry] expired bbox {}", i);
                 registry_.erase(registry_.begin() + i);
                 missed_frames_.erase(missed_frames_.begin() + i);
             }
@@ -178,6 +195,13 @@ double WallBBoxRegistry::iou(const BoundingBox& a, const BoundingBox& b) {
     return vol_inter / (vol_a + vol_b - vol_inter + 1e-9);
 }
 
+
+void WallBBoxRegistry::transform_existing_bboxes(const Eigen::Isometry3d& delta_pose) {
+    for (auto& bbox : registry_) {
+        bbox.transform(delta_pose);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // merge()
 // ---------------------------------------------------------------------------
@@ -222,4 +246,16 @@ BoundingBox WallBBoxRegistry::merge(const BoundingBox& existing,
 
     return BoundingBox(new_size, new_center, R);
 }
-}  // namespace glim
+
+
+
+void WallBBoxRegistry::remove_expired(const std::vector<bool>& empty_bboxes) {
+    for (int i = static_cast<int>(registry_.size()) - 1; i >= 0; --i) {
+        if (empty_bboxes[i]) {
+            spdlog::debug("[wall_registry] clearing empty bbox {}", i);
+            registry_.erase(registry_.begin() + i);
+            missed_frames_.erase(missed_frames_.begin() + i);
+        }
+    }
+} 
+} // namespace glim

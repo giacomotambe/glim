@@ -22,6 +22,8 @@ PoseKalmanFilter::PoseKalmanFilter()
     orientation_at_reset_(Eigen::Quaterniond::Identity()),
     last_slam_pose_(Eigen::Isometry3d::Identity()),
     has_last_slam_pose_(false),
+    T_delta(Eigen::Isometry3d::Identity()),
+    last_filtered_pose_(Eigen::Isometry3d::Identity()),
     gravity_(0.0, 0.0, -9.81)
 {
   P_ = Eigen::Matrix<double, 9, 9>::Identity() * 0.01;
@@ -33,17 +35,18 @@ PoseKalmanFilter::PoseKalmanFilter()
 // ----------------------------------------------------------------- getters
 Eigen::Isometry3d PoseKalmanFilter::getDeltaPose() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  spdlog::debug("[KF] getDeltaPose: dp=({:.4f},{:.4f},{:.4f})", delta_position_.x(), delta_position_.y(), delta_position_.z());
-  Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
-  T.translation() = delta_position_;
-  T.linear() = delta_orientation_.toRotationMatrix();
-  return T;
+  return T_delta;
 }
 
 
 Eigen::Vector3d PoseKalmanFilter::getVelocity() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return velocity_;
+}
+
+Eigen::Isometry3d PoseKalmanFilter::getPose() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return last_filtered_pose_;
 }
 
 // ----------------------------------------------------------------- predict
@@ -79,7 +82,11 @@ void PoseKalmanFilter::predict(const ImuMeasurement& imu) {
     const Eigen::Vector3d axis = imu.gyro.normalized();
     delta_orientation_ = (delta_orientation_ * Eigen::Quaterniond(Eigen::AngleAxisd(angle, axis))).normalized();
   }
+  T_delta = Eigen::Isometry3d::Identity();
+  T_delta.linear() = delta_orientation_.toRotationMatrix();
+  T_delta.translation() = delta_position_;
 
+  last_filtered_pose_ = last_slam_pose_ * T_delta;
   // --- Error-state transition Jacobian F (9×9) ---
   const Eigen::Matrix3d R_delta = delta_orientation_.toRotationMatrix();
   Eigen::Matrix<double, 9, 9> F = Eigen::Matrix<double, 9, 9>::Identity();
@@ -170,7 +177,7 @@ Eigen::Isometry3d PoseKalmanFilter::update(const Eigen::Isometry3d& T_world_imu)
   }
 
   // --- Build filtered relative transform ---
-  Eigen::Isometry3d T_delta = Eigen::Isometry3d::Identity();
+  T_delta = Eigen::Isometry3d::Identity();
   T_delta.translation() = delta_position_;
   T_delta.linear() = delta_orientation_.toRotationMatrix();
 
@@ -190,6 +197,7 @@ Eigen::Isometry3d PoseKalmanFilter::update(const Eigen::Isometry3d& T_world_imu)
   P_ = (I9 - K * H) * P_;
 
   spdlog::debug("[KF] update: reset done, returning T_filtered");
+  last_filtered_pose_ = T_filtered;
   return T_filtered;
 }
 

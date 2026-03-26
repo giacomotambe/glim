@@ -9,6 +9,7 @@
 #include <glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp>  // adjust path
 #include <glim/dynamic_rejection/bounding_box.hpp>
 #include <glim/dynamic_rejection/wall_bbox.hpp>
+#include <glim/dynamic_rejection/transformation_kalman_filter.hpp>
 
 namespace glim {
 
@@ -50,6 +51,9 @@ struct WallFilterConfig {
     double floor_ceiling_angle_deg;
     int    max_planes;
 
+    Eigen::Isometry3d T_lidar_imu;
+    Eigen::Isometry3d T_imu_lidar;
+
     WallFilterConfig();   // reads from config file
     ~WallFilterConfig();
 };
@@ -76,7 +80,8 @@ public:
     using ConstPtr = std::shared_ptr<const WallFilter>;
 
     explicit WallFilter(const WallFilterConfig& config = WallFilterConfig{},
-                        WallBBoxRegistry::Ptr bbox_registry = nullptr);
+                        WallBBoxRegistry::Ptr bbox_registry = nullptr,
+                        const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter = nullptr);
     ~WallFilter() = default;
 
     /**
@@ -127,6 +132,8 @@ private:
     WallFilterConfig  config_;
     mutable std::mt19937 rng_;
     WallBBoxRegistry::Ptr bbox_registry_;
+    std::shared_ptr<PoseKalmanFilter> pose_kalman_filter_;
+    Eigen::Isometry3d last_pose_ = Eigen::Isometry3d::Identity();
 };
 
 }  // namespace glim

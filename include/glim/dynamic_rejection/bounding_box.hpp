@@ -14,7 +14,7 @@ public:
     ~BoundingBox() = default;
 
     bool contains(const Eigen::Vector4d& point) const;
-
+    void transform(const Eigen::Isometry3d& T);
     // -----------------------------------------------------------------------
     // Getters (needed by WallBBoxRegistry for IoU / merge operations)
     // -----------------------------------------------------------------------
