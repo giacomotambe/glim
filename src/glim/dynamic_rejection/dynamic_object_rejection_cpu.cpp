@@ -49,7 +49,7 @@ DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU() {
     w_neighbor               = config.param<double>("dynamic_object_rejection", "w_neighbor",               0.6);
     history_factor           = config.param<double>("dynamic_object_rejection", "history_factor",           0.5);
     frame_num_memory         = config.param<int>   ("dynamic_object_rejection", "frame_num_memory",         10);
-    points_limit             = config.param<double>("dynamic_object_rejection", "points_limit",       0.25);
+    points_limit             = config.param<double>("dynamic_object_rejection", "points_limit",             0.25);
 
     spdlog::debug("[dynamic_rejection] params loaded");
 }
@@ -64,7 +64,7 @@ DynamicObjectRejectionParamsCPU::~DynamicObjectRejectionParamsCPU() = default;
 DynamicObjectRejectionCPU::DynamicObjectRejectionCPU(
     const DynamicObjectRejectionParamsCPU&  params,
     const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter)
-    : params_(params), pose_kalman_filter_(pose_kalman_filter)
+    : params_(params), pose_kalman_filter_(pose_kalman_filter), last_pose_(Eigen::Isometry3d::Identity())
 {
     covariance_estimation_ = std::make_unique<CloudCovarianceEstimation>(params_.num_threads);
 
@@ -98,19 +98,29 @@ DynamicRejectionResult DynamicObjectRejectionCPU::reject(
     if (voxelmap_history_.empty()) {
         spdlog::debug("[dynamic_rejection] first frame — storing reference voxelmap");
         voxelmap_history_.push_back(wf_result.voxelmap);
+        pose_history_.push_back(pose_kalman_filter_->getPose());
         last_dynamic_frame_ = nullptr;
         result.static_frame  = source_frame;
         result.dynamic_frame = nullptr;
         return result;
     }
 
+    Eigen::Isometry3d cur_pose = pose_kalman_filter_->getPose();
+    Eigen::Isometry3d T_delta_pose =  cur_pose * last_pose_.inverse();
+    last_pose_ = cur_pose;
+
+    spdlog::debug("[dynamic_rejection] delta pose since last frame: translation=({:.4f},{:.4f},{:.4f})",
+        T_delta_pose.translation().x(), T_delta_pose.translation().y(), T_delta_pose.translation().z());
+
     // -----------------------------------------------------------------------
     // Score voxels against previous frame, then propagate to neighbours
     // -----------------------------------------------------------------------
-    dynamic_voxels_indices_.clear();
-    dynamic_voxels_neighbor_indices_.clear();
-
-    score_voxels(*wf_result.voxelmap, *voxelmap_history_.back());
+    
+    auto t0 = std::chrono::steady_clock::now();
+    score_voxels(*wf_result.voxelmap, *voxelmap_history_.back(), T_delta_pose);
+    auto t1 = std::chrono::steady_clock::now();
+    spdlog::debug("[dynamic_rejection] score_voxels took {:.1f} ms",
+    std::chrono::duration<double, std::milli>(t1 - t0).count());
 
     const int nvox = nvox_of(*wf_result.voxelmap);
     propagate_to_neighbors(*wf_result.voxelmap, nvox);
@@ -132,6 +142,10 @@ DynamicRejectionResult DynamicObjectRejectionCPU::reject(
     voxelmap_history_.push_back(wf_result.voxelmap);
     if (static_cast<int>(voxelmap_history_.size()) > params_.frame_num_memory) {
         voxelmap_history_.erase(voxelmap_history_.begin());
+    }
+    pose_history_.push_back(T_delta_pose);
+    if (static_cast<int>(pose_history_.size()) > params_.frame_num_memory) {
+        pose_history_.erase(pose_history_.begin());
     }
 
     // -----------------------------------------------------------------------
@@ -175,10 +189,12 @@ DynamicRejectionResult DynamicObjectRejectionCPU::reject(
 
 void DynamicObjectRejectionCPU::score_voxels(
     gtsam_points::DynamicVoxelMapCPU&       current,
-    const gtsam_points::DynamicVoxelMapCPU& previous)
+    const gtsam_points::DynamicVoxelMapCPU& previous,
+    const Eigen::Isometry3d&                T_delta_pose)
 {
     const int nvox = nvox_of(current);
-
+    dynamic_voxels_indices_.clear();
+    dynamic_voxels_neighbor_indices_.clear();
     for (int j = 0; j < nvox; ++j) {
         auto& cur = current.lookup_voxel(j);
 
@@ -195,8 +211,10 @@ void DynamicObjectRejectionCPU::score_voxels(
             cur.dynamic_score = 0.0;
             continue;
         }
-
-        const auto coord    = current.voxel_coord(cur.mean);
+        Eigen::Vector3d p_trans = T_delta_pose * cur.mean.head<3>();
+        Eigen::Vector4d p_trans4(p_trans.x(), p_trans.y(), p_trans.z(), 1.0);
+        const auto base = previous.voxel_coord(p_trans4);
+        const auto coord    = current.voxel_coord(p_trans4);
         const int  prev_idx = previous.lookup_voxel_index(coord);
 
         if (prev_idx < 0) {
@@ -204,7 +222,7 @@ void DynamicObjectRejectionCPU::score_voxels(
             cur.is_dynamic    = true;
             cur.dynamic_score = params_.dynamic_score_threshold + 1.0;
             dynamic_voxels_indices_.push_back(j);
-            const auto nbrs = get_neighbor_voxels(current, cur.mean);
+            const auto nbrs = get_neighbor_voxels(current, p_trans4);
             dynamic_voxels_neighbor_indices_.insert(dynamic_voxels_neighbor_indices_.end(), nbrs.begin(), nbrs.end());
             continue;
         }
@@ -215,13 +233,15 @@ void DynamicObjectRejectionCPU::score_voxels(
         cur.dynamic_score = 0.0;
 
         // ---- 1. Centroid shift (normalized by voxel size) ----
-        const Eigen::Vector3d delta = (cur.mean - prv.mean).head<3>();
+        const Eigen::Vector3d delta = (p_trans - prv.mean.head<3>());
         const double shift = delta.norm() / current.voxel_resolution();
 
         // ---- 2. Mahalanobis distance ----
         double mahal = 0.0;
+        Eigen::Matrix3d R = T_delta_pose.linear();
+        
         {
-            Eigen::Matrix3d cov = cur.cov.topLeftCorner<3,3>() + prv.cov.topLeftCorner<3,3>();
+            Eigen::Matrix3d cov = R * cur.cov.topLeftCorner<3,3>() * R.transpose() + prv.cov.topLeftCorner<3,3>();
             cov = 0.5 * (cov + cov.transpose());
             cov.diagonal().array() += 1e-6;
 
@@ -244,7 +264,7 @@ void DynamicObjectRejectionCPU::score_voxels(
         double shape_change = 0.0;
         {
             Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> ep(prv.cov.topLeftCorner<3,3>());
-            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> ec(cur.cov.topLeftCorner<3,3>());
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> ec(R * cur.cov.topLeftCorner<3,3>() * R.transpose());
             if (ep.info() == Eigen::Success && ec.info() == Eigen::Success) {
                 shape_change = (ep.eigenvalues() - ec.eigenvalues()).norm() /
                                (ep.eigenvalues().norm() + 1e-6);
@@ -270,21 +290,35 @@ void DynamicObjectRejectionCPU::score_voxels(
                       j, cur.dynamic_score, shift, mahal, cov_diff, shape_change, occ_ratio);
 
         // ---- History suppression ----
-        int num_static_in_history = 0;
+        int seen_total  = 0 ;
+        int static_count = 0;
+        Eigen::Vector4d cur_mean = p_trans4;
         for (int k = 0; k < params_.frame_num_memory &&
-                        k < static_cast<int>(voxelmap_history_.size()); ++k)
+                            k < static_cast<int>(voxelmap_history_.size()) &&
+                            k < static_cast<int>(pose_history_.size()); ++k)
         {
-            const auto& past = voxelmap_history_[voxelmap_history_.size() - 1 - k];
-            const int   idx  = past->lookup_voxel_index(coord);
-            if (idx >= 0 && !past->lookup_voxel(idx).is_dynamic) {
-                ++num_static_in_history;
+            const int idx_hist = static_cast<int>(voxelmap_history_.size()) - 1 - k;
+            const auto& past      = voxelmap_history_[idx_hist];
+            const auto& pose_prev = pose_history_[idx_hist];
+
+        
+            int voxel_idx = past->lookup_voxel_index(past->voxel_coord(cur_mean));
+            Eigen::Vector3d tmp = pose_prev * cur_mean.head<3>();
+            cur_mean = Eigen::Vector4d(tmp.x(), tmp.y(), tmp.z(), 1.0);
+            if (voxel_idx < 0) continue;
+
+            ++seen_total;
+            if (!past->lookup_voxel(voxel_idx).is_dynamic) {
+                ++static_count;
             }
         }
 
-        const double pct_static = 100.0 * num_static_in_history /static_cast<double>(voxelmap_history_.size());
+        const double static_ratio =
+            (seen_total > 0) ? static_cast<double>(static_count) / seen_total : 0.0;
 
-        if (pct_static > params_.history_factor * 100.0) {
-            spdlog::debug("[dynamic_rejection] voxel {:3d}: suppressed by history ({:.0f}% static)", j, pct_static);
+
+        if (static_ratio > params_.history_factor) {
+            spdlog::debug("[dynamic_rejection] voxel {:3d}: suppressed by history ({:.0f}% static)", j, static_ratio * 100.0);
             cur.is_dynamic = false;
             continue;
         }
@@ -301,7 +335,6 @@ void DynamicObjectRejectionCPU::score_voxels(
         }
     }
 }
-
 
 // ===========================================================================
 // propagate_to_neighbors()
@@ -321,6 +354,7 @@ void DynamicObjectRejectionCPU::propagate_to_neighbors(
             v.is_dynamic = true;
         }
     }
+    dynamic_voxels_neighbor_indices_.clear();
 }
 
 

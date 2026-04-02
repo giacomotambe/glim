@@ -135,7 +135,8 @@ private:
     /// Populates dynamic_voxels_indices_ and dynamic_voxels_neighbor_indices_.
     void score_voxels(
         gtsam_points::DynamicVoxelMapCPU&       current,
-        const gtsam_points::DynamicVoxelMapCPU& previous);
+        const gtsam_points::DynamicVoxelMapCPU& previous,
+        const Eigen::Isometry3d&                T_delta_pose);
 
     /// Boost the dynamic score of direct neighbours of confirmed dynamic voxels
     /// and re-apply the threshold.
@@ -178,13 +179,17 @@ private:
 
     /// Ring buffer of past voxelmaps (oldest → newest).
     std::vector<gtsam_points::DynamicVoxelMapCPU::Ptr> voxelmap_history_;
+    std::vector<Eigen::Isometry3d> pose_history_; // optional separate history of wall-only voxelmaps
+    
 
     std::vector<int> dynamic_voxels_indices_;
     std::vector<int> dynamic_voxels_neighbor_indices_;
+    std::vector<int> neighbor_voxels_indices_;
 
     PreprocessedFrame::Ptr            last_dynamic_frame_;
     std::shared_ptr<PoseKalmanFilter> pose_kalman_filter_;
     std::unique_ptr<CloudCovarianceEstimation> covariance_estimation_;
+    Eigen::Isometry3d last_pose_;
 };
 
 }  // namespace glim

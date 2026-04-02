@@ -18,7 +18,7 @@ struct DynamicGaussianVoxel : public gtsam_points::GaussianVoxel
         using Ptr = std::shared_ptr<DynamicGaussianVoxel>;
         using ConstPtr = std::shared_ptr<const DynamicGaussianVoxel>;
 
-        DynamicGaussianVoxel() : gtsam_points::GaussianVoxel(), is_dynamic(false), is_wall(false), voxel_point_cloud(nullptr), finest_voxelmap(nullptr), dynamic_score(0.0) {}
+        DynamicGaussianVoxel() : gtsam_points::GaussianVoxel(), is_dynamic(false), is_wall(false), voxel_point_cloud(nullptr), dynamic_score(0.0) {}
     public:
         bool is_dynamic;
         bool is_wall;
@@ -26,7 +26,6 @@ struct DynamicGaussianVoxel : public gtsam_points::GaussianVoxel
         std::vector<double> voxel_intensities;
         std::vector<double> voxel_times;
         PointCloudCPU::Ptr voxel_point_cloud; // store the history of this voxel for dynamic classification
-        std::shared_ptr<DynamicVoxelMapCPU> finest_voxelmap; // store the history of this voxel for dynamic classification
         double dynamic_score; // store the dynamic score for this voxel
 
 

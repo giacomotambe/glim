@@ -79,12 +79,12 @@ void AsyncDynamicObjectRejection::run() {
             // ------------------------------------------------------------------
             const WallFilterResult wf = wall_filter_->filter(*frame);
             
-            DynamicClusterExtractor::ClusterMap cluster_map;
- 
-            // if (cluster_extractor_ && wf.voxelmap) {
-            //     cluster_map = cluster_extractor_->cluster_voxels(wf.voxelmap);
-            //     spdlog::debug("[dynamic_rejection][async] cluster_map size={}", cluster_map.size());
-            // }
+            std::vector<glim::BoundingBox> cluster_bboxes;
+
+            if (cluster_extractor_ && wf.voxelmap) {
+                cluster_bboxes = cluster_extractor_->extract_clusters(wf.voxelmap);
+                spdlog::debug("[dynamic_rejection][async] cluster_bboxes size={}", cluster_bboxes.size());
+            }
 
             // ------------------------------------------------------------------
             // Step 2: DynamicObjectRejection — score non-wall voxels
@@ -146,7 +146,7 @@ void AsyncDynamicObjectRejection::run() {
 
             wall_result_queue.push_back(wf);
             output_frame_queue.push_back(dr.static_frame);
-
+            cluster_bbox_queue_.push_back(cluster_bboxes);
             if (dr.dynamic_frame) {
                 dynamic_frame_queue.push_back(dr.dynamic_frame);
             }

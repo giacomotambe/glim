@@ -33,9 +33,11 @@ struct PlaneModel {
 struct WallFilterResult {
     gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap;
     std::vector<PlaneModel> wall_planes;
+    std::vector<PlaneModel> floor_planes;
     int num_wall_voxels  = 0;
     int num_total_voxels = 0;
 };
+
 
 // ---------------------------------------------------------------------------
 // Configurazione
@@ -49,7 +51,10 @@ struct WallFilterConfig {
     double ransac_confidence;
     double wall_vertical_angle_deg;
     double floor_ceiling_angle_deg;
+    int    floor_min_inliers;
     int    max_planes;
+    double wall_bbox_max_aspect_ratio;
+    double floor_height_threshold;
 
     Eigen::Isometry3d T_lidar_imu;
     Eigen::Isometry3d T_imu_lidar;
@@ -128,6 +133,13 @@ private:
                 
     BoundingBox build_wall_bbox(const std::vector<Eigen::Vector3d>& inlier_pts,
                                 const PlaneModel& plane) const;
+    
+    std::vector<Eigen::Vector3d> extract_largest_contiguous_cluster(const std::vector<Eigen::Vector3d>& inliers,
+                                                                    double cluster_eps) const;
+
+    bool is_wall_bbox_compact(const BoundingBox& bbox) const;
+
+    double lowest_point_z(const std::vector<Eigen::Vector3d>& pts) const;
 
     WallFilterConfig  config_;
     mutable std::mt19937 rng_;

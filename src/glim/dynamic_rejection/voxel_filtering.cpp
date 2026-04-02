@@ -7,6 +7,9 @@
 #include <glim/util/config.hpp>
 #include <gtsam_points/types/point_cloud_cpu.hpp>
 #include <gtsam_points/ann/impl/incremental_voxelmap_impl.hpp>
+#include <gtsam_points/ann/kdtree.hpp>
+
+
 
 #include <spdlog/spdlog.h>
 
@@ -28,15 +31,18 @@ WallFilterConfig::WallFilterConfig() {
     wall_vertical_angle_deg = config.param<double>("wall_filter", "wall_vertical_angle_deg", 20.0);
     max_planes              = config.param<int>   ("wall_filter", "max_planes",              8);
     floor_ceiling_angle_deg = config.param<double>("wall_filter", "floor_ceiling_angle_deg", 2.0);
+    floor_min_inliers          = config.param<int>   ("wall_filter", "floor_min_inliers",       20);
+    wall_bbox_max_aspect_ratio = config.param<double>("wall_filter", "wall_bbox_max_aspect_ratio", 5.0);
+    floor_height_threshold      = config.param<double>("wall_filter", "floor_height_threshold", 0.2);
 
 
 
     T_lidar_imu = sensor_config.param<Eigen::Isometry3d>("sensors", "T_lidar_imu", Eigen::Isometry3d::Identity());
     T_imu_lidar = T_lidar_imu.inverse();
     spdlog::debug("[wall_filter] WallFilterConfig: res={} ransac_iter={} thresh={} min_inliers={} "
-                  "conf={} angle_deg={} max_planes={}",
+                  "conf={} angle_deg={} max_planes={} bbox_max_aspect_ratio={}",
                   voxel_resolution, ransac_max_iterations, ransac_inlier_threshold,
-                  ransac_min_inliers, ransac_confidence, wall_vertical_angle_deg, max_planes);
+                  ransac_min_inliers, ransac_confidence, wall_vertical_angle_deg, max_planes, wall_bbox_max_aspect_ratio);
 }
 
 WallFilterConfig::~WallFilterConfig() {
@@ -109,16 +115,23 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
     // Step 4 – Classifica i piani come parete o pavimento/soffitto
     // ------------------------------------------------------------------
     for (const auto& plane : all_planes) {
-        if (is_wall_plane(plane) || is_floor_ceiling_plane(plane)) {
+        if (is_wall_plane(plane)) {
             result.wall_planes.push_back(plane);
             spdlog::debug("[wall_filter] wall plane: normal=({:.2f},{:.2f},{:.2f})",
                           plane.normal.x(), plane.normal.y(), plane.normal.z());
         }
+
+        if (is_floor_ceiling_plane(plane)) {
+            result.floor_planes.push_back(plane);
+            spdlog::debug("[wall_filter] floor plane: normal=({:.2f},{:.2f},{:.2f})",
+                          plane.normal.x(), plane.normal.y(), plane.normal.z());
+        }
     }
+
 
     spdlog::debug("[wall_filter] {} wall planes", result.wall_planes.size());
 
-    if (result.wall_planes.empty()) {
+    if (result.wall_planes.empty() && result.floor_planes.empty()) {
         return result;
     }
 
@@ -136,24 +149,59 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
                   result.num_wall_voxels, nvox);
 
     
-    if (bbox_registry_ && !result.wall_planes.empty()) {
+    if (bbox_registry_) {
         const std::vector<Eigen::Vector3d> all_centroids =
             extract_centroids(*voxelmap, nvox);
 
         std::vector<BoundingBox> wall_bboxes;
-        wall_bboxes.reserve(result.wall_planes.size());
+        wall_bboxes.reserve(result.wall_planes.size()+result.floor_planes.size());
 
         for (const auto& plane : result.wall_planes) {
+            // 1. Raccogli gli inlier per questo piano
             std::vector<Eigen::Vector3d> inliers;
             for (const auto& c : all_centroids) {
-                if (plane.distance(c) < config_.ransac_inlier_threshold) {
+                if (plane.distance(c) < config_.ransac_inlier_threshold)
                     inliers.push_back(c);
-                }
             }
-            spdlog::debug("[wall_filter] plane with {} inliers", inliers.size());
-            if (static_cast<int>(inliers.size()) >= config_.ransac_min_inliers) {
-                wall_bboxes.push_back(build_wall_bbox(inliers, plane));
+            if (static_cast<int>(inliers.size()) < config_.ransac_min_inliers) continue;
+
+            // 2. *** NUOVO: tieni solo il cluster connesso più grande ***
+            // eps = 2x la risoluzione voxel (adiacenti sul piano devono connettersi)
+            const double cluster_eps = config_.voxel_resolution * 2.5;
+            const auto contiguous = extract_largest_contiguous_cluster(inliers, cluster_eps);
+
+            if (static_cast<int>(contiguous.size()) < config_.ransac_min_inliers) {
+                spdlog::debug("[wall_filter] plane discarded: largest contiguous cluster "
+                            "has only {} inliers", contiguous.size());
+                continue;
             }
+
+            // 3. Costruisci la bbox solo sui punti contigui
+            BoundingBox bbox = build_wall_bbox(contiguous, plane);
+
+            // 4. *** NUOVO: scarta bbox troppo allungate ***
+            if (!is_wall_bbox_compact(bbox)) {
+                spdlog::debug("[wall_filter] plane discarded: bbox aspect ratio too large");
+                continue;
+            }
+
+            wall_bboxes.push_back(bbox);
+        }
+        spdlog::debug("[wall_filter] built {} wall bboxes",  result.floor_planes.size());
+
+        for (const auto& plane : result.floor_planes) {
+
+
+            std::vector<Eigen::Vector3d> inliers;
+            for (const auto& c : all_centroids) {
+                if (plane.distance(c) < config_.ransac_inlier_threshold)
+                    inliers.push_back(c);
+            }
+            if (static_cast<int>(inliers.size()) < config_.floor_min_inliers) continue;
+
+            BoundingBox bbox = build_wall_bbox(inliers, plane);
+            wall_bboxes.push_back(bbox);
+            
         }
 
         
@@ -164,7 +212,7 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
                 Eigen::Isometry3d T_world_imu =  pose_kalman_filter_->getPose(); // Inverti per trasformare dal vecchio al nuovo frame
                 T_delta_pose = last_pose_.inverse() * T_world_imu; // Delta tra il vecchio e il nuovo frame
                 last_pose_ = T_world_imu; // Aggiorna il last_pose_ con il nuovo frame
-                spdlog::info("[wall_filter] obtained delta pose from Kalman filter: translation=({:.4f},{:.4f},{:.4f})",
+                spdlog::debug("[wall_filter] obtained delta pose from Kalman filter: translation=({:.4f},{:.4f},{:.4f})",
                               T_delta_pose.translation().x(), T_delta_pose.translation().y(), T_delta_pose.translation().z());
 
             }
@@ -177,10 +225,15 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
     std::vector<bool> empty_bboxes;
     if (bbox_registry_ && !bbox_registry_->bboxes().empty()) {
         empty_bboxes.assign(bbox_registry_->bboxes().size(), true);
-
+        double lower_z = lowest_point_z(centroids) + config_.floor_height_threshold; // Soglia per escludere voxel troppo bassi per essere pareti
+        
+         // Marca i voxel che cadono dentro le bbox registrate
         int registry_marked = 0;
         for (int i = 0; i < nvox; ++i) {
             auto& voxel = voxelmap->lookup_voxel(i);
+            if (voxel.mean.z() < lower_z) {
+                voxel.is_wall = true;
+            }; 
             if (voxel.is_wall) continue;
 
             for (size_t j = 0; j < bbox_registry_->bboxes().size(); ++j) {
@@ -200,8 +253,9 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
         result.num_wall_voxels += registry_marked;
     }
 
-   // if (bbox_registry_) bbox_registry_->remove_expired(empty_bboxes);
 
+
+    if (bbox_registry_) bbox_registry_->remove_expired(empty_bboxes);
     return result;
 }
 
@@ -339,6 +393,94 @@ bool WallFilter::ransac_once(std::vector<Eigen::Vector3d>& pts, PlaneModel& best
     return true;
 }
 
+
+
+// Dato un insieme di punti inlier sul piano RANSAC, tieni solo il cluster
+// spazialmente connesso più grande (union-find sui centroidi voxel).
+std::vector<Eigen::Vector3d> WallFilter::extract_largest_contiguous_cluster(
+    const std::vector<Eigen::Vector3d>& inliers,
+    double cluster_eps) const
+{
+    const int n = static_cast<int>(inliers.size());
+    if (n == 0) return {};
+
+    // Union-Find
+    std::vector<int> parent(n);
+    std::iota(parent.begin(), parent.end(), 0);
+
+    std::function<int(int)> find = [&](int x) -> int {
+        return parent[x] == x ? x : parent[x] = find(parent[x]);
+    };
+    auto unite = [&](int a, int b) {
+        parent[find(a)] = find(b);
+    };
+
+    // Connetti coppie entro cluster_eps (per n piccolo la O(n²) va bene;
+    // per n > ~500 usa un KdTree come nel codice sotto)
+    if (n <= 500) {
+        const double eps2 = cluster_eps * cluster_eps;
+        for (int i = 0; i < n; ++i)
+            for (int j = i + 1; j < n; ++j)
+                if ((inliers[i] - inliers[j]).squaredNorm() < eps2)
+                    unite(i, j);
+    } else {
+        // KdTree path per dataset grandi
+        std::vector<Eigen::Vector4d> pts4(n);
+        for (int i = 0; i < n; ++i)
+            pts4[i] = Eigen::Vector4d(inliers[i].x(), inliers[i].y(), inliers[i].z(), 1.0);
+        gtsam_points::KdTree tree(pts4.data(), n);
+        const int K = std::min(n, 16);
+        for (int i = 0; i < n; ++i) {
+            std::vector<size_t> idx(K);
+            std::vector<double> sq(K);
+            const size_t found = tree.knn_search(pts4[i].data(), K, idx.data(), sq.data());
+            for (size_t k = 0; k < found; ++k)
+                if (sq[k] < cluster_eps * cluster_eps)
+                    unite(i, static_cast<int>(idx[k]));
+        }
+    }
+
+    // Conta dimensione di ogni componente
+    std::unordered_map<int, std::vector<int>> components;
+    for (int i = 0; i < n; ++i)
+        components[find(i)].push_back(i);
+
+    int best_root = -1;
+    int best_size = 0;
+    for (const auto& [root, members] : components) {
+        if (static_cast<int>(members.size()) > best_size) {
+            best_size = static_cast<int>(members.size());
+            best_root = root;
+        }
+    }
+
+    if (best_root < 0) return inliers;
+
+    std::vector<Eigen::Vector3d> result;
+    result.reserve(best_size);
+    for (int idx : components[best_root])
+        result.push_back(inliers[idx]);
+
+    spdlog::debug("[wall_filter] contiguity: kept {}/{} inliers (largest cluster)",
+                  best_size, n);
+    return result;
+}
+
+
+// Ritorna false se la bbox è troppo allungata per essere un muro reale.
+bool WallFilter::is_wall_bbox_compact(const BoundingBox& bbox) const {
+    const Eigen::Vector3d& s = bbox.get_size();
+    if (s.minCoeff() < 1e-3) return false;
+
+    // Ordina le dimensioni: minor <= mid <= major
+    Eigen::Vector3d dims = s;
+    std::sort(dims.data(), dims.data() + 3);
+    const double aspect = dims[2] / dims[1];  // major/mid
+
+    // Un muro reale è ragionevolmente rettangolare: rapporto max ~5:1
+    return aspect < config_.wall_bbox_max_aspect_ratio;
+}
+
 // ---------------------------------------------------------------------------
 bool WallFilter::is_wall_plane(const PlaneModel& plane) const {
     // Parete → normale quasi orizzontale → |normal.z| piccolo
@@ -381,6 +523,14 @@ int WallFilter::mark_wall_voxels(
     return count;
 }
 
+
+double WallFilter::lowest_point_z(const std::vector<Eigen::Vector3d>& pts) const {
+    double min_z = std::numeric_limits<double>::max();
+    for (const auto& p : pts) {
+        if (p.z() < min_z) min_z = p.z();
+    }
+    return min_z;
+}
 
 BoundingBox WallFilter::build_wall_bbox(
     const std::vector<Eigen::Vector3d>& inlier_pts,
