@@ -1,4 +1,4 @@
-#include <glim/dynamic_rejection/dynamic_cluster_extractor.hpp>
+#include <glim/dynamic_rejection/cluster_extractor.hpp>
 
 #include <algorithm>
 #include <spdlog/spdlog.h>
@@ -28,13 +28,19 @@ DynamicClusterExtractorParams::DynamicClusterExtractorParams() {
     bbox_min_volume = config.param<double>("dynamic_cluster_extractor", "bbox_min_volume", 0.0);
     bbox_max_volume = config.param<double>("dynamic_cluster_extractor", "bbox_max_volume", 1e9);
 
+    // Cluster classification
+    cluster_distance_threshold = config.param<double>("dynamic_cluster_extractor", "cluster_distance_threshold", 0.5);
+    cluster_iou_threshold = config.param<double>("dynamic_cluster_extractor", "cluster_iou_threshold", 0.5);
+
     spdlog::debug("[cluster_extractor] eps_factor={:.2f} min_pts={} knn_max={} "
                   "min_cluster_voxels={} min_points_bbox={} "
-                  "bbox_extent=[{:.2f},{:.2f}] bbox_volume=[{:.3f},{:.3f}]",
+                  "bbox_extent=[{:.2f},{:.2f}] bbox_volume=[{:.3f},{:.3f}] "
+                  "cluster_distance_threshold={:.2f} cluster_iou_threshold={:.2f}",
                   eps_voxel_factor, min_pts, knn_max_neighbors,
                   min_cluster_voxels, min_points_for_bbox,
                   bbox_min_extent, bbox_max_extent,
-                  bbox_min_volume, bbox_max_volume);
+                  bbox_min_volume, bbox_max_volume,
+                  cluster_distance_threshold, cluster_iou_threshold);
 }
 
 DynamicClusterExtractorParams::~DynamicClusterExtractorParams() = default;
@@ -43,8 +49,8 @@ DynamicClusterExtractorParams::~DynamicClusterExtractorParams() = default;
 // Costruttori
 // ===========================================================================
 
-DynamicClusterExtractor::DynamicClusterExtractor()
-    : params_() {}
+DynamicClusterExtractor::DynamicClusterExtractor(const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter)
+    : params_(), pose_kalman_filter_(pose_kalman_filter) {}
 
 DynamicClusterExtractor::DynamicClusterExtractor(
     const DynamicClusterExtractorParams& params)
@@ -55,7 +61,7 @@ DynamicClusterExtractor::DynamicClusterExtractor(
 // ===========================================================================
 
 std::vector<BoundingBox> DynamicClusterExtractor::extract_clusters(
-    gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap) const
+    gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap)
 {
     const auto cluster_map = cluster_voxels(voxelmap);
 
@@ -65,7 +71,15 @@ std::vector<BoundingBox> DynamicClusterExtractor::extract_clusters(
     }
     spdlog::debug("[cluster_extractor] found {} clusters", num_clusters);
     const auto clusters = build_point_clusters(voxelmap, cluster_map, num_clusters);
-    return compute_bounding_boxes(clusters);
+    auto bboxes = compute_bounding_boxes(clusters);
+    if (pose_kalman_filter_) {
+        Eigen::Isometry3d cur_pose = pose_kalman_filter_->getDeltaPose();
+        Eigen::Isometry3d T_delta_pose = cur_pose * last_pose_.inverse();
+        last_pose_ = cur_pose;
+        classify_clusters(T_delta_pose, bboxes);
+        last_cluster_bboxes_ = bboxes;
+    }
+    return bboxes;
 }
 
 // ===========================================================================
@@ -265,77 +279,164 @@ DynamicClusterExtractor::compute_bounding_boxes(
 // viene modificata.
 // ===========================================================================
 
+// bool DynamicClusterExtractor::createOBB(
+//     const std::vector<Eigen::Vector4d>& cluster,
+//     BoundingBox& out_bbox) const
+// {
+//     // --- Centroide ---
+//     Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+//     for (const auto& p : cluster) mean += p.head<3>();
+//     mean /= static_cast<double>(cluster.size());
+
+//     // --- Matrice di covarianza ---
+//     Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+//     for (const auto& p : cluster) {
+//         const Eigen::Vector3d d = p.head<3>() - mean;
+//         cov += d * d.transpose();
+//     }
+//     cov /= static_cast<double>(cluster.size());
+
+//     // --- Assi principali (PCA) ---
+//     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
+//     const Eigen::Matrix3d R = solver.eigenvectors();
+
+//     // --- AABB nel frame locale ---
+//     Eigen::Vector3d local_min( 1e9,  1e9,  1e9);
+//     Eigen::Vector3d local_max(-1e9, -1e9, -1e9);
+//     for (const auto& p : cluster) {
+//         const Eigen::Vector3d local = R.transpose() * (p.head<3>() - mean);
+//         local_min = local_min.cwiseMin(local);
+//         local_max = local_max.cwiseMax(local);
+//     }
+
+//     const Eigen::Vector3d size         = local_max - local_min;
+//     const Eigen::Vector3d center_local = 0.5 * (local_max + local_min);
+//     const Eigen::Vector3d center       = R * center_local + mean;
+
+//     // -----------------------------------------------------------------------
+//     // Filtri dimensionali
+//     // -----------------------------------------------------------------------
+//     const double min_dim = size.minCoeff();
+//     const double max_dim = size.maxCoeff();
+//     const double volume  = size.x() * size.y() * size.z();
+
+//     // 1. Lato minimo troppo piccolo (oggetto quasi planare / rumore)
+//     if (params_.bbox_min_extent > 0.0 && min_dim < params_.bbox_min_extent) {
+//         spdlog::debug("[cluster_extractor] bbox rejected: min_extent {:.3f} < {:.3f}",
+//                       min_dim, params_.bbox_min_extent);
+//         return false;
+//     }
+
+//     // 2. Lato massimo troppo grande (falso positivo, muro, etc.)
+//     if (params_.bbox_max_extent < 1e8 && max_dim > params_.bbox_max_extent) {
+//         spdlog::debug("[cluster_extractor] bbox rejected: max_extent {:.3f} > {:.3f}",
+//                       max_dim, params_.bbox_max_extent);
+//         return false;
+//     }
+
+//     // 3. Volume troppo piccolo
+//     if (params_.bbox_min_volume > 0.0 && volume < params_.bbox_min_volume) {
+//         spdlog::debug("[cluster_extractor] bbox rejected: volume {:.4f} < {:.4f}",
+//                       volume, params_.bbox_min_volume);
+//         return false;
+//     }
+
+//     // 4. Volume troppo grande
+//     if (params_.bbox_max_volume < 1e8 && volume > params_.bbox_max_volume) {
+//         spdlog::debug("[cluster_extractor] bbox rejected: volume {:.4f} > {:.4f}",
+//                       volume, params_.bbox_max_volume);
+//         return false;
+//     }
+
+//     out_bbox = BoundingBox(size, center, R);
+//     return true;
+// }
+
+
+
+
 bool DynamicClusterExtractor::createOBB(
     const std::vector<Eigen::Vector4d>& cluster,
     BoundingBox& out_bbox) const
 {
-    // --- Centroide ---
-    Eigen::Vector3d mean = Eigen::Vector3d::Zero();
-    for (const auto& p : cluster) mean += p.head<3>();
-    mean /= static_cast<double>(cluster.size());
+    Eigen::Vector3d mn( 1e9,  1e9,  1e9);
+    Eigen::Vector3d mx(-1e9, -1e9, -1e9);
 
-    // --- Matrice di covarianza ---
-    Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
     for (const auto& p : cluster) {
-        const Eigen::Vector3d d = p.head<3>() - mean;
-        cov += d * d.transpose();
-    }
-    cov /= static_cast<double>(cluster.size());
-
-    // --- Assi principali (PCA) ---
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
-    const Eigen::Matrix3d R = solver.eigenvectors();
-
-    // --- AABB nel frame locale ---
-    Eigen::Vector3d local_min( 1e9,  1e9,  1e9);
-    Eigen::Vector3d local_max(-1e9, -1e9, -1e9);
-    for (const auto& p : cluster) {
-        const Eigen::Vector3d local = R.transpose() * (p.head<3>() - mean);
-        local_min = local_min.cwiseMin(local);
-        local_max = local_max.cwiseMax(local);
+        mn = mn.cwiseMin(p.head<3>());
+        mx = mx.cwiseMax(p.head<3>());
     }
 
-    const Eigen::Vector3d size         = local_max - local_min;
-    const Eigen::Vector3d center_local = 0.5 * (local_max + local_min);
-    const Eigen::Vector3d center       = R * center_local + mean;
-
-    // -----------------------------------------------------------------------
-    // Filtri dimensionali
-    // -----------------------------------------------------------------------
+    const Eigen::Vector3d size  = mx - mn;
+    const Eigen::Vector3d center = 0.5 * (mn + mx);
     const double min_dim = size.minCoeff();
     const double max_dim = size.maxCoeff();
     const double volume  = size.x() * size.y() * size.z();
 
-    // 1. Lato minimo troppo piccolo (oggetto quasi planare / rumore)
     if (params_.bbox_min_extent > 0.0 && min_dim < params_.bbox_min_extent) {
         spdlog::debug("[cluster_extractor] bbox rejected: min_extent {:.3f} < {:.3f}",
                       min_dim, params_.bbox_min_extent);
         return false;
     }
-
-    // 2. Lato massimo troppo grande (falso positivo, muro, etc.)
     if (params_.bbox_max_extent < 1e8 && max_dim > params_.bbox_max_extent) {
         spdlog::debug("[cluster_extractor] bbox rejected: max_extent {:.3f} > {:.3f}",
                       max_dim, params_.bbox_max_extent);
         return false;
     }
-
-    // 3. Volume troppo piccolo
     if (params_.bbox_min_volume > 0.0 && volume < params_.bbox_min_volume) {
         spdlog::debug("[cluster_extractor] bbox rejected: volume {:.4f} < {:.4f}",
                       volume, params_.bbox_min_volume);
         return false;
     }
-
-    // 4. Volume troppo grande
     if (params_.bbox_max_volume < 1e8 && volume > params_.bbox_max_volume) {
         spdlog::debug("[cluster_extractor] bbox rejected: volume {:.4f} > {:.4f}",
                       volume, params_.bbox_max_volume);
         return false;
     }
 
-    out_bbox = BoundingBox(size, center, R);
+    // AABB: rotazione = identità, size e center già calcolati
+    out_bbox = BoundingBox(size, center, Eigen::Matrix3d::Identity());
     return true;
 }
+
+// ===========================================================================
+// classify_clusters()
+// ===========================================================================
+// Mark a cluster as static se rispetto a last_cluster_bboxes è completamente contenuto in un cluster statico precedente.
+void DynamicClusterExtractor::classify_clusters(
+    Eigen::Isometry3d T_delta_pose,
+    std::vector<BoundingBox>& cluster_bboxes)
+{
+    for (auto& cluster : cluster_bboxes) {
+        bool is_dynamic_cluster = true;
+        auto transformed_cluster = cluster;
+        transformed_cluster.transform(T_delta_pose);
+        for (const auto& prev_cluster : last_cluster_bboxes_) {
+            auto cur_center = transformed_cluster.get_center();
+            auto last_center = prev_cluster.get_center();
+            double distance = (cur_center - last_center).norm();
+            
+
+            //confronta i volumi del cluster attuale e del cluster precedente, se sono simili e il centro del cluster attuale è vicino al centro del cluster precedente, allora consideriamo il cluster attuale come statico
+            double volume_cur = transformed_cluster.get_size().prod();
+            double volume_prev = prev_cluster.get_size().prod();
+            double volume_ratio = std::min(volume_cur, volume_prev) / std::max(volume_cur, volume_prev);
+            
+
+            double iou = transformed_cluster.iou(prev_cluster);
+            if (iou > params_.cluster_iou_threshold && distance < params_.cluster_distance_threshold) {
+                spdlog::debug("[cluster_extractor] cluster classified as STATIC: volume ratio {:.4f} distance {:.4f} IoU {:.4f} IoU_inv {:.4f} ",
+                    volume_ratio  , distance, iou);
+                cluster.set_dynamic(false);
+                break;
+            }
+        }
+    }
+    last_cluster_bboxes_ = cluster_bboxes;
+
+}
+
+
+
 
 } // namespace glim

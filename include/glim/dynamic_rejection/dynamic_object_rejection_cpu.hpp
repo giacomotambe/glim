@@ -6,6 +6,8 @@
 #include <glim/dynamic_rejection/transformation_kalman_filter.hpp>
 #include <glim/dynamic_rejection/voxel_filtering.hpp>
 #include <glim/common/cloud_covariance_estimation.hpp>
+#include <glim/dynamic_rejection/cluster_extractor.hpp>
+
 
 namespace glim {
 
@@ -32,8 +34,11 @@ public:
     double history_factor;
     int    frame_num_memory;
 
-    // Voxelization — must match odometry and WallFilter settings
-    double voxel_resolution;
+    // Cluster propagation
+    double cluster_propagation_threshold;
+    // Neighbor propagation
+    double neighbor_static_threshold;
+    
 
     // Misc
     int num_threads;
@@ -108,7 +113,8 @@ public:
      */
     DynamicRejectionResult reject(
         const WallFilterResult&       wf_result,
-        const PreprocessedFrame::Ptr& source_frame);
+        const PreprocessedFrame::Ptr& source_frame,
+        const std::vector<BoundingBox>& cluster_bboxes = std::vector<BoundingBox>());
 
     // -----------------------------------------------------------------------
     // Accessors
@@ -122,9 +128,6 @@ public:
         return voxelmap_history_.empty() ? nullptr : voxelmap_history_.back();
     }
 
-    std::vector<int> get_dynamic_voxel_indices() const {
-        return dynamic_voxels_indices_;
-    }
 
 private:
     // -----------------------------------------------------------------------
@@ -142,6 +145,10 @@ private:
     /// and re-apply the threshold.
     void propagate_to_neighbors(
         gtsam_points::DynamicVoxelMapCPU& voxelmap, int nvox);
+    
+    /// If a percentage of voxels in a cluster are dynamic, mark the whole cluster as dynamic.
+    void propagate_to_clusters(
+        gtsam_points::DynamicVoxelMapCPU& voxelmap, const std::vector<BoundingBox>& cluster_bboxes);   
 
     /// Iterate all voxels and append their raw points to the appropriate bucket.
     void collect_points(
@@ -170,6 +177,7 @@ private:
         const gtsam_points::DynamicVoxelMapCPU& voxelmap,
         const Eigen::Vector4d& mean) const;
 
+
 private:
     // -----------------------------------------------------------------------
     // State
@@ -182,14 +190,16 @@ private:
     std::vector<Eigen::Isometry3d> pose_history_; // optional separate history of wall-only voxelmaps
     
 
-    std::vector<int> dynamic_voxels_indices_;
     std::vector<int> dynamic_voxels_neighbor_indices_;
+    std::vector<int> dynamic_voxels;
     std::vector<int> neighbor_voxels_indices_;
 
     PreprocessedFrame::Ptr            last_dynamic_frame_;
     std::shared_ptr<PoseKalmanFilter> pose_kalman_filter_;
     std::unique_ptr<CloudCovarianceEstimation> covariance_estimation_;
     Eigen::Isometry3d last_pose_;
+
+    std::vector<BoundingBox> last_cluster_bboxes_;
 };
 
 }  // namespace glim

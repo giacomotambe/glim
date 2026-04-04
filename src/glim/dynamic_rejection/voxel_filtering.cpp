@@ -255,6 +255,7 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
 
 
 
+    
     if (bbox_registry_) bbox_registry_->remove_expired(empty_bboxes);
     return result;
 }

@@ -8,6 +8,7 @@
 #include <gtsam_points/types/point_cloud_cpu.hpp>
 #include <glim/dynamic_rejection/dynamic_voxelmap_cpu.hpp>
 #include <glim/dynamic_rejection/bounding_box.hpp>
+#include <glim/dynamic_rejection/transformation_kalman_filter.hpp>
 
 namespace glim {
 
@@ -66,6 +67,9 @@ public:
     /// Volume massimo ammesso [m³].
     /// Default: 1e9  (nessun filtro)
     double bbox_max_volume;
+        // Cluster classification
+    double cluster_distance_threshold;
+    double cluster_iou_threshold;
 };
 
 // ===========================================================================
@@ -76,7 +80,7 @@ public:
     using VoxelMapPtr = gtsam_points::DynamicVoxelMapCPU::Ptr;
     using ClusterMap  = std::vector<int>;
 
-    DynamicClusterExtractor();
+    DynamicClusterExtractor(const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter = nullptr);
     explicit DynamicClusterExtractor(const DynamicClusterExtractorParams& params);
     ~DynamicClusterExtractor() = default;
 
@@ -106,16 +110,26 @@ public:
 
     const DynamicClusterExtractorParams& params() const { return params_; }
 
-    std::vector<BoundingBox> extract_clusters(gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap) const;
+    std::vector<BoundingBox> extract_clusters(gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap);
 
 private:
     /// Crea l'OBB per un singolo cluster.  Ritorna true se l'OBB supera i
     /// filtri dimensionali configurati, false se deve essere scartata.
     bool createOBB(const std::vector<Eigen::Vector4d>& cluster,
                    BoundingBox& out_bbox) const;
+    
+    void classify_clusters(
+        Eigen::Isometry3d T_delta_pose,
+        std::vector<BoundingBox>& cluster_bboxes);
+    
 
 private:
     DynamicClusterExtractorParams params_;
+    std::vector <BoundingBox> last_cluster_bboxes_;
+    std::shared_ptr<PoseKalmanFilter> pose_kalman_filter_;
+    Eigen::Isometry3d last_pose_;
+
+
 };
 
 } // namespace glim

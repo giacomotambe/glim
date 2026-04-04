@@ -180,7 +180,7 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::Const
   }
 
   preprocessed->k_neighbors = params.k_correspondences;
-  preprocessed->neighbors = find_neighbors(frame->points, frame->size(), params.k_correspondences);
+  //preprocessed->neighbors = find_neighbors(frame->points, frame->size(), params.k_correspondences);
 
   spdlog::trace("preprocessed: {} -> {} points", raw_points->size(), preprocessed->size());
 

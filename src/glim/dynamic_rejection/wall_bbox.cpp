@@ -206,135 +206,135 @@ void WallBBoxRegistry::transform_existing_bboxes(const Eigen::Isometry3d& delta_
 // merge()
 // ---------------------------------------------------------------------------
 
-// BoundingBox WallBBoxRegistry::merge(const BoundingBox& existing,
-//                                      const BoundingBox& incoming,
-//                                      double weight)
-// {
-//     // Manteniamo il frame locale della bbox esistente (rotazione fissa)
-//     const Eigen::Matrix3d& R    = existing.get_rotation();
-//     const Eigen::Vector3d& c_ex = existing.get_center();
-
-//     // Half extents della bbox esistente nel suo frame locale
-//     const Eigen::Vector3d he_ex = existing.get_size() * 0.5;
-
-//     // Trasforma il centro della incoming nel frame locale della existing
-//     const Eigen::Vector3d c_in_local = R.transpose() * (incoming.get_center() - c_ex);
-//     const Eigen::Vector3d he_in      = incoming.get_size() * 0.5;
-
-//     // Gli 8 vertici della incoming nel frame locale della existing
-//     // (ruotiamo anche l'orientamento della incoming nel frame della existing)
-//     const Eigen::Matrix3d R_in_local = R.transpose() * incoming.get_rotation();
-
-//     Eigen::Vector3d local_min = -he_ex;
-//     Eigen::Vector3d local_max =  he_ex;
-
-//     for (int sx : {-1, 1})
-//     for (int sy : {-1, 1})
-//     for (int sz : {-1, 1}) {
-//         const Eigen::Vector3d corner_local =
-//             R_in_local * Eigen::Vector3d(sx * he_in.x(),
-//                                           sy * he_in.y(),
-//                                           sz * he_in.z());
-//         const Eigen::Vector3d v = c_in_local + corner_local;
-//         local_min = local_min.cwiseMin(v);
-//         local_max = local_max.cwiseMax(v);
-//     }
-
-//     // Nuove dimensioni e centro nel mondo
-//     const Eigen::Vector3d new_size   = local_max - local_min;
-//     const Eigen::Vector3d new_center = c_ex + R * (0.5 * (local_max + local_min));
-
-//     return BoundingBox(new_size, new_center, R);
-// }
-
-
 BoundingBox WallBBoxRegistry::merge(const BoundingBox& existing,
                                      const BoundingBox& incoming,
                                      double weight)
 {
-    // Keep existing frame
+    // Manteniamo il frame locale della bbox esistente (rotazione fissa)
     const Eigen::Matrix3d& R    = existing.get_rotation();
     const Eigen::Vector3d& c_ex = existing.get_center();
 
-    // Half extents
+    // Half extents della bbox esistente nel suo frame locale
     const Eigen::Vector3d he_ex = existing.get_size() * 0.5;
-    const Eigen::Vector3d he_in = incoming.get_size() * 0.5;
 
-    // Transform incoming center into existing local frame
-    const Eigen::Vector3d c_in_local =
-        R.transpose() * (incoming.get_center() - c_ex);
+    // Trasforma il centro della incoming nel frame locale della existing
+    const Eigen::Vector3d c_in_local = R.transpose() * (incoming.get_center() - c_ex);
+    const Eigen::Vector3d he_in      = incoming.get_size() * 0.5;
 
-    // Incoming rotation in existing frame
-    const Eigen::Matrix3d R_in_local =
-        R.transpose() * incoming.get_rotation();
+    // Gli 8 vertici della incoming nel frame locale della existing
+    // (ruotiamo anche l'orientamento della incoming nel frame della existing)
+    const Eigen::Matrix3d R_in_local = R.transpose() * incoming.get_rotation();
 
-    // Initialize bounds with existing box
     Eigen::Vector3d local_min = -he_ex;
     Eigen::Vector3d local_max =  he_ex;
 
-    // Expand bounds with incoming corners
     for (int sx : {-1, 1})
     for (int sy : {-1, 1})
     for (int sz : {-1, 1}) {
-        Eigen::Vector3d corner_local =
+        const Eigen::Vector3d corner_local =
             R_in_local * Eigen::Vector3d(sx * he_in.x(),
-                                        sy * he_in.y(),
-                                        sz * he_in.z());
-
-        Eigen::Vector3d v = c_in_local + corner_local;
-
-        if (!v.allFinite()) continue;
-
+                                          sy * he_in.y(),
+                                          sz * he_in.z());
+        const Eigen::Vector3d v = c_in_local + corner_local;
         local_min = local_min.cwiseMin(v);
         local_max = local_max.cwiseMax(v);
     }
 
-    // New size from geometric merge
-    Eigen::Vector3d new_size = local_max - local_min;
-
-    // Existing size
-    const Eigen::Vector3d size_ex = existing.get_size();
-
-    // Identify thickness axis (smallest dimension of existing box)
-    int thickness_axis;
-    size_ex.minCoeff(&thickness_axis);
-
-    // Extract thickness values
-    const double thickness_ex = size_ex[thickness_axis];
-    const double thickness_new = new_size[thickness_axis];
-
-    // Accept update only if consistent (avoid sudden expansion)
-    const double max_ratio = 2.0; // tunable
-    bool accept_update =
-        (thickness_new > 0.0) &&
-        (thickness_new < thickness_ex * max_ratio);
-
-    if (accept_update) {
-        // Weighted update of thickness
-        new_size[thickness_axis] =
-            (1.0 - weight) * thickness_ex +
-            weight * thickness_new;
-    } else {
-        // Reject update, keep previous thickness
-        new_size[thickness_axis] = thickness_ex;
-    }
-
-    // Compute center in local frame
-    Eigen::Vector3d center_local = 0.5 * (local_max + local_min);
-
-    // Stabilize center along thickness axis (avoid drifting)
-    center_local[thickness_axis] = 0.0;
-
-    // Transform back to world
-    const Eigen::Vector3d new_center = c_ex + R * center_local;
-
-    // Final safety check
-    if (!new_center.allFinite() || !new_size.allFinite()) {
-        return existing;
-    }
+    // Nuove dimensioni e centro nel mondo
+    const Eigen::Vector3d new_size   = local_max - local_min;
+    const Eigen::Vector3d new_center = c_ex + R * (0.5 * (local_max + local_min));
 
     return BoundingBox(new_size, new_center, R);
 }
+
+
+// BoundingBox WallBBoxRegistry::merge(const BoundingBox& existing,
+//                                      const BoundingBox& incoming,
+//                                      double weight)
+// {
+//     // Keep existing frame
+//     const Eigen::Matrix3d& R    = existing.get_rotation();
+//     const Eigen::Vector3d& c_ex = existing.get_center();
+
+//     // Half extents
+//     const Eigen::Vector3d he_ex = existing.get_size() * 0.5;
+//     const Eigen::Vector3d he_in = incoming.get_size() * 0.5;
+
+//     // Transform incoming center into existing local frame
+//     const Eigen::Vector3d c_in_local =
+//         R.transpose() * (incoming.get_center() - c_ex);
+
+//     // Incoming rotation in existing frame
+//     const Eigen::Matrix3d R_in_local =
+//         R.transpose() * incoming.get_rotation();
+
+//     // Initialize bounds with existing box
+//     Eigen::Vector3d local_min = -he_ex;
+//     Eigen::Vector3d local_max =  he_ex;
+
+//     // Expand bounds with incoming corners
+//     for (int sx : {-1, 1})
+//     for (int sy : {-1, 1})
+//     for (int sz : {-1, 1}) {
+//         Eigen::Vector3d corner_local =
+//             R_in_local * Eigen::Vector3d(sx * he_in.x(),
+//                                         sy * he_in.y(),
+//                                         sz * he_in.z());
+
+//         Eigen::Vector3d v = c_in_local + corner_local;
+
+//         if (!v.allFinite()) continue;
+
+//         local_min = local_min.cwiseMin(v);
+//         local_max = local_max.cwiseMax(v);
+//     }
+
+//     // New size from geometric merge
+//     Eigen::Vector3d new_size = local_max - local_min;
+
+//     // Existing size
+//     const Eigen::Vector3d size_ex = existing.get_size();
+
+//     // Identify thickness axis (smallest dimension of existing box)
+//     int thickness_axis;
+//     size_ex.minCoeff(&thickness_axis);
+
+//     // Extract thickness values
+//     const double thickness_ex = size_ex[thickness_axis];
+//     const double thickness_new = new_size[thickness_axis];
+
+//     // Accept update only if consistent (avoid sudden expansion)
+//     const double max_ratio = 2.0; // tunable
+//     bool accept_update =
+//         (thickness_new > 0.0) &&
+//         (thickness_new < thickness_ex * max_ratio);
+
+//     if (accept_update) {
+//         // Weighted update of thickness
+//         new_size[thickness_axis] =
+//             (1.0 - weight) * thickness_ex +
+//             weight * thickness_new;
+//     } else {
+//         // Reject update, keep previous thickness
+//         new_size[thickness_axis] = thickness_ex;
+//     }
+
+//     // Compute center in local frame
+//     Eigen::Vector3d center_local = 0.5 * (local_max + local_min);
+
+//     // Stabilize center along thickness axis (avoid drifting)
+//     center_local[thickness_axis] = 0.0;
+
+//     // Transform back to world
+//     const Eigen::Vector3d new_center = c_ex + R * center_local;
+
+//     // Final safety check
+//     if (!new_center.allFinite() || !new_size.allFinite()) {
+//         return existing;
+//     }
+
+//     return BoundingBox(new_size, new_center, R);
+// }
 
 
 

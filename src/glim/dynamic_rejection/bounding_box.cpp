@@ -11,7 +11,8 @@ BoundingBox::BoundingBox(const Eigen::Vector3d& size,
                          const Eigen::Matrix3d& rotation)
     : size(size),
       center(center),
-      rotation(rotation)
+      rotation(rotation),
+        is_dynamic(true)  // default to dynamic, can be set later
 {
     // Precompute values used in contains()
     R_inv = rotation.transpose();
@@ -40,6 +41,24 @@ void BoundingBox::transform(const Eigen::Isometry3d& T) {
 
     // Aggiorna la matrice inversa per contains()
     R_inv = rotation.transpose();
+}
+
+
+
+
+double BoundingBox::iou(const BoundingBox& other) const {
+    // Intersezione: clamp dei bound sovrapposti
+    const Eigen::Vector3d inter_min = (center - half_size).cwiseMax(other.center - other.half_size);
+    const Eigen::Vector3d inter_max = (center + half_size).cwiseMin(other.center + other.half_size);
+    const Eigen::Vector3d inter_size = (inter_max - inter_min).cwiseMax(Eigen::Vector3d::Zero());
+
+    const double vol_inter = inter_size.x() * inter_size.y() * inter_size.z();
+    if (vol_inter <= 0.0) return 0.0;
+
+    const double vol_a = (2.0 * half_size).prod();
+    const double vol_b = (2.0 * other.half_size).prod();
+
+    return vol_inter / (vol_a + vol_b - vol_inter + 1e-9);
 }
 
 }  // namespace glim

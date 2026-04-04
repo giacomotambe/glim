@@ -15,18 +15,21 @@ public:
 
     bool contains(const Eigen::Vector4d& point) const;
     void transform(const Eigen::Isometry3d& T);
+    double iou(const BoundingBox& other) const;
     // -----------------------------------------------------------------------
     // Getters (needed by WallBBoxRegistry for IoU / merge operations)
     // -----------------------------------------------------------------------
     const Eigen::Vector3d& get_size()     const { return size; }
     const Eigen::Vector3d& get_center()   const { return center; }
     const Eigen::Matrix3d& get_rotation() const { return rotation; }
+    const bool is_dynamic_bbox() const { return is_dynamic; }
+    void set_dynamic(bool dynamic) { is_dynamic = dynamic; }
 
 private:
     Eigen::Vector3d size;
     Eigen::Vector3d center;
     Eigen::Matrix3d rotation;
-
+    bool is_dynamic;
     // Precomputed for contains()
     Eigen::Matrix3d R_inv;
     Eigen::Vector3d half_size;

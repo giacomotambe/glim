@@ -72,26 +72,42 @@ void AsyncDynamicObjectRejection::run() {
         }
 
         spdlog::debug("[dynamic_rejection][async] processing batch of {} frames", frames.size());
-
+        const auto T = [](const std::chrono::steady_clock::time_point& t0) {
+                        using ms = std::chrono::duration<double, std::milli>;
+                        return std::chrono::duration_cast<ms>(std::chrono::steady_clock::now() - t0).count();
+                    };
         for (const auto& frame : frames) {
+            // Helper to compute elapsed milliseconds since a time_point
+            
             // ------------------------------------------------------------------
             // Step 1: WallFilter — voxelize + mark wall voxels
             // ------------------------------------------------------------------
+            auto t_wall = std::chrono::steady_clock::now();
             const WallFilterResult wf = wall_filter_->filter(*frame);
-            
+            spdlog::debug("[PERF] wall_filter      {:.1f} ms  ({} vox)", T(t_wall), wf.num_total_voxels);
+
+
             std::vector<glim::BoundingBox> cluster_bboxes;
 
+
+            auto t_cluster = std::chrono::steady_clock::now();
             if (cluster_extractor_ && wf.voxelmap) {
                 cluster_bboxes = cluster_extractor_->extract_clusters(wf.voxelmap);
                 spdlog::debug("[dynamic_rejection][async] cluster_bboxes size={}", cluster_bboxes.size());
             }
+            spdlog::debug("[PERF] cluster_extract  {:.1f} ms  ({} bbox)", T(t_cluster), cluster_bboxes.size());
 
             // ------------------------------------------------------------------
             // Step 2: DynamicObjectRejection — score non-wall voxels
             // ------------------------------------------------------------------
+            auto t_reject = std::chrono::steady_clock::now();
             const DynamicRejectionResult dr =
-                dynamic_rejection_->reject(wf, frame);
-            
+                dynamic_rejection_->reject(wf, frame, cluster_bboxes);
+
+
+            spdlog::debug("[PERF] reject           {:.1f} ms", T(t_reject));
+
+            spdlog::debug("[PERF] TOTAL FRAME      {:.1f} ms", T(t_wall));
             // ------------------------------------------------------------------
             // Enqueue outputs
             // ------------------------------------------------------------------

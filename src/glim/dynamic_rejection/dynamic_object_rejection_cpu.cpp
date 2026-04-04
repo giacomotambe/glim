@@ -20,6 +20,8 @@
 #include <tbb/parallel_for.h>
 #endif
 
+#include <glim/dynamic_rejection/bounding_box.hpp>
+
 namespace glim {
 
 // ===========================================================================
@@ -50,6 +52,8 @@ DynamicObjectRejectionParamsCPU::DynamicObjectRejectionParamsCPU() {
     history_factor           = config.param<double>("dynamic_object_rejection", "history_factor",           0.5);
     frame_num_memory         = config.param<int>   ("dynamic_object_rejection", "frame_num_memory",         10);
     points_limit             = config.param<double>("dynamic_object_rejection", "points_limit",             0.25);
+    cluster_propagation_threshold = config.param<double>("dynamic_object_rejection", "cluster_propagation_threshold", 0.5);
+
 
     spdlog::debug("[dynamic_rejection] params loaded");
 }
@@ -82,7 +86,8 @@ DynamicObjectRejectionCPU::DynamicObjectRejectionCPU(
 
 DynamicRejectionResult DynamicObjectRejectionCPU::reject(
     const WallFilterResult&       wf_result,
-    const PreprocessedFrame::Ptr& source_frame)
+    const PreprocessedFrame::Ptr& source_frame,
+    const std::vector<BoundingBox>& cluster_bboxes)
 {
     spdlog::debug("[dynamic_rejection] reject begin: voxelmap={} wall_voxels={}/{}",
         static_cast<bool>(wf_result.voxelmap),
@@ -124,6 +129,7 @@ DynamicRejectionResult DynamicObjectRejectionCPU::reject(
 
     const int nvox = nvox_of(*wf_result.voxelmap);
     propagate_to_neighbors(*wf_result.voxelmap, nvox);
+    propagate_to_clusters(*wf_result.voxelmap, cluster_bboxes);
 
     // -----------------------------------------------------------------------
     // Split voxel points into static / dynamic buckets
@@ -193,8 +199,8 @@ void DynamicObjectRejectionCPU::score_voxels(
     const Eigen::Isometry3d&                T_delta_pose)
 {
     const int nvox = nvox_of(current);
-    dynamic_voxels_indices_.clear();
     dynamic_voxels_neighbor_indices_.clear();
+    dynamic_voxels.clear();
     for (int j = 0; j < nvox; ++j) {
         auto& cur = current.lookup_voxel(j);
 
@@ -221,8 +227,8 @@ void DynamicObjectRejectionCPU::score_voxels(
             // Voxel newly appeared — flag as dynamic candidate
             cur.is_dynamic    = true;
             cur.dynamic_score = params_.dynamic_score_threshold + 1.0;
-            dynamic_voxels_indices_.push_back(j);
-            const auto nbrs = get_neighbor_voxels(current, p_trans4);
+            const auto nbrs = get_neighbor_voxels(current, cur.mean);
+            dynamic_voxels.insert(dynamic_voxels.end(), nbrs.size(), j);
             dynamic_voxels_neighbor_indices_.insert(dynamic_voxels_neighbor_indices_.end(), nbrs.begin(), nbrs.end());
             continue;
         }
@@ -326,8 +332,8 @@ void DynamicObjectRejectionCPU::score_voxels(
         // ---- Threshold ----
         if (cur.dynamic_score > params_.dynamic_score_threshold) {
             cur.is_dynamic = true;
-            dynamic_voxels_indices_.push_back(j);
             const auto nbrs = get_neighbor_voxels(current, cur.mean);
+            dynamic_voxels.insert(dynamic_voxels.end(), nbrs.size(), j);
             dynamic_voxels_neighbor_indices_.insert(dynamic_voxels_neighbor_indices_.end(), nbrs.begin(), nbrs.end());
             spdlog::debug("[dynamic_rejection] voxel {:3d}: DYNAMIC", j);
         } else {
@@ -355,9 +361,71 @@ void DynamicObjectRejectionCPU::propagate_to_neighbors(
         }
     }
     dynamic_voxels_neighbor_indices_.clear();
+    dynamic_voxels.clear();
 }
 
 
+
+// ===========================================================================
+// propagate_to_clusters()
+// ===========================================================================
+// If a percentage of voxels in a cluster are dynamic, mark the whole cluster as dynamic.
+void DynamicObjectRejectionCPU::propagate_to_clusters(
+    gtsam_points::DynamicVoxelMapCPU& voxelmap,
+    const std::vector<BoundingBox>& cluster_bboxes)
+{
+    if (cluster_bboxes.empty()) return;
+
+    const int nvox = nvox_of(voxelmap);
+    const int n_clusters = static_cast<int>(cluster_bboxes.size());
+
+    // Un solo passaggio: assegna ogni voxel al suo cluster (-1 = nessuno)
+    std::vector<int>  voxel_cluster(nvox, -1);
+    std::vector<int>  dynamic_count(n_clusters, 0);
+    std::vector<int>  total_count(n_clusters, 0);
+
+    for (int j = 0; j < nvox; ++j) {
+        const auto& v = voxelmap.lookup_voxel(j);
+        for (int c = 0; c < n_clusters; ++c) {
+            if (cluster_bboxes[c].contains(v.mean)) {
+                voxel_cluster[j] = c;
+                ++total_count[c];
+                if (v.is_dynamic) ++dynamic_count[c];
+                break; // un voxel può appartenere a un solo cluster
+            }
+        }
+    }
+
+    // Determina quali cluster vanno marcati dinamici
+    std::vector<bool> cluster_is_dynamic(n_clusters, false);
+    for (int c = 0; c < n_clusters; ++c) {
+        if (total_count[c] == 0) continue;
+        const double ratio = static_cast<double>(dynamic_count[c]) / total_count[c];
+        cluster_is_dynamic[c] = (ratio > params_.cluster_propagation_threshold);
+        spdlog::debug("[dynamic_rejection] cluster {}: {}/{} dynamic ({:.1f}%) -> {}",
+                      c, dynamic_count[c], total_count[c], ratio * 100.0,
+                      cluster_is_dynamic[c] ? "DYNAMIC" : "static");
+    }
+
+    // Secondo passaggio (solo se almeno un cluster è dinamico)
+    bool any_dynamic = std::any_of(cluster_is_dynamic.begin(), cluster_is_dynamic.end(),
+                                   [](bool b){ return b; });
+    if (!any_dynamic) return;
+
+    for (int j = 0; j < nvox; ++j) {
+        const int c = voxel_cluster[j];
+        if (c < 0 || !cluster_is_dynamic[c] ) {
+            spdlog::debug("[dynamic_rejection] voxel {:3d}: cluster {} is not dynamic or not valid", j, c);
+            continue;
+        }
+        auto& v = voxelmap.lookup_voxel(j);
+        if (!v.is_wall) 
+            if (cluster_bboxes[c].is_dynamic_bbox())
+                v.is_dynamic = true;
+            else
+                v.is_dynamic = false;
+    }
+}
 // ===========================================================================
 // collect_points()
 // ===========================================================================
