@@ -59,6 +59,10 @@ std::vector<std::vector<BoundingBox>> AsyncDynamicObjectRejection::get_cluster_b
     return cluster_bbox_queue_.get_all_and_clear();
 }
 
+std::vector<std::deque<std::vector<BoundingBox>>> AsyncDynamicObjectRejection::get_cluster_history_results() {
+    return cluster_history_queue_.get_all_and_clear();
+}
+
 void AsyncDynamicObjectRejection::run() {
     spdlog::debug("[dynamic_rejection][async] thread started");
 
@@ -163,6 +167,9 @@ void AsyncDynamicObjectRejection::run() {
             wall_result_queue.push_back(wf);
             output_frame_queue.push_back(dr.static_frame);
             cluster_bbox_queue_.push_back(cluster_bboxes);
+            if (cluster_extractor_) {
+                cluster_history_queue_.push_back(cluster_extractor_->get_cluster_history_snapshot());
+            }
             if (dr.dynamic_frame) {
                 dynamic_frame_queue.push_back(dr.dynamic_frame);
             }

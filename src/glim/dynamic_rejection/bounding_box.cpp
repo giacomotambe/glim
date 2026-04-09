@@ -34,6 +34,17 @@ bool BoundingBox::contains(const Eigen::Vector4d& point) const {
 }
 
 
+bool BoundingBox::contains_bbox(const BoundingBox& inner) const {
+    // AABB containment: inner is fully inside this if its interval is a subset on all axes.
+    const Eigen::Vector3d this_min  = center - half_size;
+    const Eigen::Vector3d this_max  = center + half_size;
+    const Eigen::Vector3d inner_min = inner.center - inner.half_size;
+    const Eigen::Vector3d inner_max = inner.center + inner.half_size;
+    return (inner_min.x() >= this_min.x() && inner_max.x() <= this_max.x() &&
+            inner_min.y() >= this_min.y() && inner_max.y() <= this_max.y() &&
+            inner_min.z() >= this_min.z() && inner_max.z() <= this_max.z());
+}
+
 void BoundingBox::transform(const Eigen::Isometry3d& T) {
     // Aggiorna centro e rotazione
     center = T * center;

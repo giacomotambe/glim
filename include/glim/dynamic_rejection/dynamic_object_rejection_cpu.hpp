@@ -39,7 +39,8 @@ public:
     // Neighbor propagation
     double neighbor_static_threshold;
     
-
+    double w_cluster;
+    double w_history;
     // Misc
     int num_threads;
 };
@@ -139,6 +140,7 @@ private:
     void score_voxels(
         gtsam_points::DynamicVoxelMapCPU&       current,
         const gtsam_points::DynamicVoxelMapCPU& previous,
+        const std::vector<BoundingBox>&         cluster_bboxes,
         const Eigen::Isometry3d&                T_delta_pose);
 
     /// Boost the dynamic score of direct neighbours of confirmed dynamic voxels

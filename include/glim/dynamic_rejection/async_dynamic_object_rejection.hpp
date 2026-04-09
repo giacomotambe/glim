@@ -77,6 +77,10 @@ public:
     /// Drain and return the most recent cluster bounding boxes.
     std::vector<std::vector<BoundingBox>> get_cluster_bbox_results();
 
+    /// Drain and return history snapshots (one deque per processed frame).
+    /// Each deque contains one vector<BoundingBox> per past frame (index 0 = most recent).
+    std::vector<std::deque<std::vector<BoundingBox>>> get_cluster_history_results();
+
 private:
     void run();
 
@@ -89,7 +93,8 @@ private:
     ConcurrentVector<glim::PreprocessedFrame::Ptr> output_frame_queue;
     ConcurrentVector<glim::PreprocessedFrame::Ptr> dynamic_frame_queue;
     ConcurrentVector<WallFilterResult>             wall_result_queue;
-    ConcurrentVector<std::vector<BoundingBox>>    cluster_bbox_queue_;
+    ConcurrentVector<std::vector<BoundingBox>>              cluster_bbox_queue_;
+    ConcurrentVector<std::deque<std::vector<BoundingBox>>> cluster_history_queue_;
 
     std::shared_ptr<DynamicObjectRejectionCPU> dynamic_rejection_;
     std::shared_ptr<WallFilter>                wall_filter_;

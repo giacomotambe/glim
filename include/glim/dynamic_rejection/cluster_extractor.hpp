@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <vector>
 #include <unordered_map>
 #include <Eigen/Core>
@@ -67,9 +68,22 @@ public:
     /// Volume massimo ammesso [m³].
     /// Default: 1e9  (nessun filtro)
     double bbox_max_volume;
-        // Cluster classification
+    // Cluster classification
     double cluster_distance_threshold;
     double cluster_iou_threshold;
+
+    /// Numero di frame passati da conservare nella storia per la classificazione.
+    /// Default: 5
+    int history_size;
+
+    /// Numero minimo di frame storici in cui un cluster deve matchare per essere
+    /// classificato come statico (deve includere il frame immediatamente precedente).
+    /// Default: 3
+    int min_static_history_matches;
+
+
+    double containment_margin;  // default 0.1m
+    double merge_volume_ratio;  // default 1.5
 };
 
 // ===========================================================================
@@ -112,6 +126,12 @@ public:
 
     std::vector<BoundingBox> extract_clusters(gtsam_points::DynamicVoxelMapCPU::Ptr voxelmap);
 
+    /// Returns a snapshot of the history as a vector-of-vectors (one per frame age).
+    /// Index 0 = most recent frame, index N-1 = oldest.
+    std::deque<std::vector<BoundingBox>> get_cluster_history_snapshot() const {
+        return cluster_history_;
+    }
+
 private:
     /// Crea l'OBB per un singolo cluster.  Ritorna true se l'OBB supera i
     /// filtri dimensionali configurati, false se deve essere scartata.
@@ -121,11 +141,17 @@ private:
     void classify_clusters(
         Eigen::Isometry3d T_delta_pose,
         std::vector<BoundingBox>& cluster_bboxes);
+
+    std::vector<BoundingBox> merge_with_history(
+        const std::vector<BoundingBox>& current_bboxes,
+        const std::deque<std::vector<BoundingBox>>& history) const;
     
 
 private:
     DynamicClusterExtractorParams params_;
-    std::vector <BoundingBox> last_cluster_bboxes_;
+    /// Storia degli ultimi N frame: ogni entry è il vettore di bbox in quel frame,
+    /// già aggiornate alle coordinate del frame corrente ad ogni chiamata.
+    std::deque<std::vector<BoundingBox>> cluster_history_;
     std::shared_ptr<PoseKalmanFilter> pose_kalman_filter_;
     Eigen::Isometry3d last_pose_;
 

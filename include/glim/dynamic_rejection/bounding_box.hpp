@@ -14,6 +14,8 @@ public:
     ~BoundingBox() = default;
 
     bool contains(const Eigen::Vector4d& point) const;
+    /// Returns true if `inner` is fully contained inside this bbox (AABB check).
+    bool contains_bbox(const BoundingBox& inner) const;
     void transform(const Eigen::Isometry3d& T);
     double iou(const BoundingBox& other) const;
     // -----------------------------------------------------------------------
