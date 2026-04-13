@@ -7,6 +7,7 @@ namespace glim {
 
 class BoundingBox {
 public:
+    BoundingBox();
     BoundingBox(const Eigen::Vector3d& size,
                 const Eigen::Vector3d& center,
                 const Eigen::Matrix3d& rotation);
@@ -27,11 +28,15 @@ public:
     const bool is_dynamic_bbox() const { return is_dynamic; }
     void set_dynamic(bool dynamic) { is_dynamic = dynamic; }
 
+    int  get_track_id() const { return track_id; }
+    void set_track_id(int id)  { track_id = id; }
+
 private:
     Eigen::Vector3d size;
     Eigen::Vector3d center;
     Eigen::Matrix3d rotation;
     bool is_dynamic;
+    int  track_id;  ///< -1 = untracked / phantom
     // Precomputed for contains()
     Eigen::Matrix3d R_inv;
     Eigen::Vector3d half_size;

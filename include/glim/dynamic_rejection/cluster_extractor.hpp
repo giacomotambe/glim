@@ -14,6 +14,22 @@
 namespace glim {
 
 // ===========================================================================
+// Track — lightweight bounding-box track for temporal consistency
+// ===========================================================================
+struct Track {
+    int             id;             ///< Unique track ID
+    Eigen::Vector3d center;         ///< Last known center (current sensor frame)
+    Eigen::Vector3d velocity;       ///< Estimated velocity (delta per frame)
+    BoundingBox     last_bbox;      ///< Last matched bbox (for IoU gating)
+    int             age;            ///< Frames the track has been alive
+    int             missed_frames;  ///< Consecutive frames without a match
+    int             slow_frames;    ///< Consecutive frames with speed < velocity_static_threshold
+    int             dynamic_count;  ///< Consecutive frames raw-classified dynamic
+    int             static_count;   ///< Consecutive frames raw-classified static
+    bool            is_dynamic;     ///< Stable, hysteresis-filtered state
+};
+
+// ===========================================================================
 // DynamicClusterExtractorParams
 // ===========================================================================
 struct DynamicClusterExtractorParams {
@@ -84,6 +100,35 @@ public:
 
     double containment_margin;  // default 0.1m
     double merge_volume_ratio;  // default 1.5
+
+    // --- Cluster tracking ---
+
+    /// Max center distance (predicted) to associate a bbox to a track [m].
+    /// Default: 1.5
+    double track_match_distance;
+    double track_match_iou;  // default 0.3
+
+    /// A track is deleted after this many consecutive unmatched frames.
+    /// Default: 3
+    int track_max_missed;
+
+    /// Consecutive frames raw-classified dynamic required to flip stable state
+    /// from static → dynamic.  Default: 2
+    int hysteresis_dynamic_n;
+
+    /// Consecutive frames raw-classified static required to flip stable state
+    /// from dynamic → static.  Default: 3
+    int hysteresis_static_m;
+
+    // --- Velocity-based static override ---
+
+    /// Speed below which a track is considered slow [m/frame].
+    /// Default: 0.05
+    double velocity_static_threshold;
+
+    /// Consecutive slow frames required to force the track to static.
+    /// Default: 3
+    int velocity_static_frames;
 };
 
 // ===========================================================================
@@ -142,6 +187,16 @@ private:
         Eigen::Isometry3d T_delta_pose,
         std::vector<BoundingBox>& cluster_bboxes);
 
+    /// Match current bboxes to existing tracks (nearest-neighbour on predicted
+    /// center), update track kinematics, create new tracks for unmatched bboxes,
+    /// and prune tracks that have been missing too long.
+    /// Attaches the matched track ID to each bbox via BoundingBox::set_track_id().
+    /// @param bboxes       Current-frame bboxes (in current sensor frame).
+    /// @param T_to_current Transform that brings previous-frame coords into the
+    ///                     current sensor frame (= T_delta_pose.inverse()).
+    void update_tracks(std::vector<BoundingBox>& bboxes,
+                       const Eigen::Isometry3d&  T_to_current);
+
     std::vector<BoundingBox> merge_with_history(
         const std::vector<BoundingBox>& current_bboxes,
         const std::deque<std::vector<BoundingBox>>& history) const;
@@ -154,6 +209,11 @@ private:
     std::deque<std::vector<BoundingBox>> cluster_history_;
     std::shared_ptr<PoseKalmanFilter> pose_kalman_filter_;
     Eigen::Isometry3d last_pose_;
+
+    /// Active tracks, maintained across frames.
+    std::vector<Track> tracks_;
+    /// Monotonically increasing track ID counter.
+    int next_track_id_ = 0;
 
 
 };

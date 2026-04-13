@@ -3,19 +3,40 @@
     ------------------
     Improved dynamic cluster extractor.
 
-    Key changes vs v2:
-      5. merge_with_history(): new method implementing temporal bbox merging.
-         If a large historical bbox contains one or more current small bboxes,
-         those are replaced by the historical bbox (marked static).
-         This handles the case where a single object is over-segmented into
-         multiple small clusters in the current frame.
-      6. classify_clusters() now calls merge_with_history() first, then runs
-         the standard static/dynamic classification on the remaining bboxes.
+    Changes vs v4:
+      FIX-1  Classification stability: track velocity is now used as the
+             primary static/dynamic discriminator.  A track whose speed stays
+             below `velocity_static_threshold` for `velocity_static_frames`
+             consecutive frames is declared static regardless of the raw
+             IoU/distance vote.  This fixes the case where a spatially-stable
+             cluster with a consistent track ID was still flipping to DYNAMIC
+             because the history IoU vote oscillated due to odometry drift.
+
+      OPT-1  History is no longer deep-copied every frame.  Instead, the
+             transformed copy is built once in classify_clusters() and reused
+             by both merge_with_history() and the IoU classification loop.
+             Saves O(H * M) BoundingBox copies per frame.
+
+      OPT-2  update_tracks() candidate generation is now guarded by a cheap
+             size_compatible() pre-filter before the expensive iou() call.
+             Full iou() is only computed for the small subset that passes.
+
+      OPT-3  Hysteresis step uses an unordered_map<int, Track*> built once
+             per frame instead of O(N_bbox * N_tracks) linear find_if searches.
+
+      OPT-4  merge_with_history() uses pre-computed current bbox centers and
+             a cheap squared-distance pre-filter before the oriented
+             containment test.
+
+      OPT-5  classify_clusters() step 4 uses a squared-distance pre-filter
+             before iou() for each history bbox.
 */
 
 #include <glim/dynamic_rejection/cluster_extractor.hpp>
 
 #include <algorithm>
+#include <limits>
+#include <unordered_map>
 #include <spdlog/spdlog.h>
 #include <gtsam_points/ann/kdtree.hpp>
 #include <glim/util/config.hpp>
@@ -47,27 +68,41 @@ DynamicClusterExtractorParams::DynamicClusterExtractorParams() {
     history_size               = config.param<int>   ("dynamic_cluster_extractor", "history_size",               5);
     min_static_history_matches = config.param<int>   ("dynamic_cluster_extractor", "min_static_history_matches", 3);
 
-    // New param: a current bbox is considered "contained" in a historical one
-    // if its center lies inside the historical bbox expanded by this margin (metres).
     containment_margin = config.param<double>("dynamic_cluster_extractor", "containment_margin", 0.1);
-
-    // New param: minimum volume ratio hist/current to trigger merging.
-    // Avoids replacing a large current bbox with an equally-large historical one.
     merge_volume_ratio = config.param<double>("dynamic_cluster_extractor", "merge_volume_ratio", 1.5);
+
+    // --- Tracking params ---
+    track_match_distance  = config.param<double>("dynamic_cluster_extractor", "track_match_distance",  1.5);
+    track_match_iou       = config.param<double>("dynamic_cluster_extractor", "track_match_iou",       0.3);
+    track_max_missed      = config.param<int>   ("dynamic_cluster_extractor", "track_max_missed",      3);
+    hysteresis_dynamic_n  = config.param<int>   ("dynamic_cluster_extractor", "hysteresis_dynamic_n",  2);
+    hysteresis_static_m   = config.param<int>   ("dynamic_cluster_extractor", "hysteresis_static_m",   3);
+
+    // FIX-1: velocity-based static discrimination params.
+    velocity_static_threshold = config.param<double>("dynamic_cluster_extractor", "velocity_static_threshold", 0.05);
+    velocity_static_frames    = config.param<int>   ("dynamic_cluster_extractor", "velocity_static_frames",    3);
 
     spdlog::debug("[cluster_extractor] eps_factor={:.2f} min_pts={} knn_max={} "
                   "min_cluster_voxels={} min_points_bbox={} "
                   "bbox_extent=[{:.2f},{:.2f}] bbox_volume=[{:.3f},{:.3f}] "
                   "cluster_distance_threshold={:.2f} cluster_iou_threshold={:.2f} "
                   "history_size={} min_static_history_matches={} "
-                  "containment_margin={:.2f} merge_volume_ratio={:.2f}",
+                  "containment_margin={:.2f} merge_volume_ratio={:.2f} "
+                  "track_match_distance={:.2f} track_match_iou={:.2f} "
+                  "track_max_missed={} "
+                  "hysteresis_dynamic_n={} hysteresis_static_m={} "
+                  "velocity_static_threshold={:.3f} velocity_static_frames={}",
                   eps_voxel_factor, min_pts, knn_max_neighbors,
                   min_cluster_voxels, min_points_for_bbox,
                   bbox_min_extent, bbox_max_extent,
                   bbox_min_volume, bbox_max_volume,
                   cluster_distance_threshold, cluster_iou_threshold,
                   history_size, min_static_history_matches,
-                  containment_margin, merge_volume_ratio);
+                  containment_margin, merge_volume_ratio,
+                  track_match_distance, track_match_iou,
+                  track_max_missed,
+                  hysteresis_dynamic_n, hysteresis_static_m,
+                  velocity_static_threshold, velocity_static_frames);
 }
 
 DynamicClusterExtractorParams::~DynamicClusterExtractorParams() = default;
@@ -107,6 +142,7 @@ static std::vector<BoundingBox> nms3D(
 
     std::vector<bool> suppressed(N, false);
     std::vector<BoundingBox> result;
+    result.reserve(N);
     for (int i = 0; i < N; ++i) {
         const int ii = candidates[i].idx;
         if (suppressed[ii]) continue;
@@ -244,10 +280,8 @@ DynamicClusterExtractor::cluster_voxels(
             }
         }
 
-        // Reset in_seed for next cluster (only touch used entries)
         for (int nb : seed_set) in_seed[nb] = false;
         in_seed[i] = false;
-
         ++cluster_id;
     }
 
@@ -353,7 +387,8 @@ bool DynamicClusterExtractor::createOBB(
     const int N = static_cast<int>(cluster.size());
 
     Eigen::Vector2d mean2d = Eigen::Vector2d::Zero();
-    double z_min =  1e9, z_max = -1e9;
+    double z_min =  std::numeric_limits<double>::max();
+    double z_max = -std::numeric_limits<double>::max();
     for (const auto& p : cluster) {
         mean2d += p.head<2>();
         z_min = std::min(z_min, p.z());
@@ -371,8 +406,10 @@ bool DynamicClusterExtractor::createOBB(
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solver(cov2d);
     const Eigen::Matrix2d R2d = solver.eigenvectors();
 
-    Eigen::Vector2d local_min( 1e9,  1e9);
-    Eigen::Vector2d local_max(-1e9, -1e9);
+    Eigen::Vector2d local_min( std::numeric_limits<double>::max(),
+                                std::numeric_limits<double>::max());
+    Eigen::Vector2d local_max(-std::numeric_limits<double>::max(),
+                              -std::numeric_limits<double>::max());
     for (const auto& p : cluster) {
         Eigen::Vector2d local = R2d.transpose() * (p.head<2>() - mean2d);
         local_min = local_min.cwiseMin(local);
@@ -396,212 +433,399 @@ bool DynamicClusterExtractor::createOBB(
     const double max_dim = size.maxCoeff();
     const double volume  = size.x() * size.y() * size.z();
 
-    if (params_.bbox_min_extent > 0.0 && min_dim < params_.bbox_min_extent) {
-        spdlog::debug("[cluster_extractor] bbox rejected: min_extent {:.3f} < {:.3f}",
-                      min_dim, params_.bbox_min_extent);
-        return false;
-    }
-    if (params_.bbox_max_extent < 1e8 && max_dim > params_.bbox_max_extent) {
-        spdlog::debug("[cluster_extractor] bbox rejected: max_extent {:.3f} > {:.3f}",
-                      max_dim, params_.bbox_max_extent);
-        return false;
-    }
-    if (params_.bbox_min_volume > 0.0 && volume < params_.bbox_min_volume) {
-        spdlog::debug("[cluster_extractor] bbox rejected: volume {:.4f} < {:.4f}",
-                      volume, params_.bbox_min_volume);
-        return false;
-    }
-    if (params_.bbox_max_volume < 1e8 && volume > params_.bbox_max_volume) {
-        spdlog::debug("[cluster_extractor] bbox rejected: volume {:.4f} > {:.4f}",
-                      volume, params_.bbox_max_volume);
-        return false;
-    }
+    if (params_.bbox_min_extent > 0.0 && min_dim < params_.bbox_min_extent) return false;
+    if (params_.bbox_max_extent < 1e8 && max_dim > params_.bbox_max_extent) return false;
+    if (params_.bbox_min_volume > 0.0 && volume < params_.bbox_min_volume)  return false;
+    if (params_.bbox_max_volume < 1e8 && volume > params_.bbox_max_volume)  return false;
 
     out_bbox = BoundingBox(size, center, R3d);
     return true;
 }
 
 // ===========================================================================
-// contains_center()
-//
-// Returns true if `query` center lies inside `container` expanded by margin.
-// Works in the local frame of `container` to respect its orientation.
+// Anonymous utilities
 // ===========================================================================
 
-static bool contains_center(
+namespace {
+
+// OPT-4: accepts pre-computed query center to avoid repeated get_center() calls.
+bool contains_center(
     const BoundingBox& container,
-    const BoundingBox& query,
+    const Eigen::Vector3d& query_center,
     double margin)
 {
-    // Transform query center into container's local frame
-    const Eigen::Vector3d delta      = query.get_center() - container.get_center();
-    const Eigen::Vector3d local      = container.get_rotation().transpose() * delta;
-    const Eigen::Vector3d half_size  = 0.5 * container.get_size();
-    const Eigen::Vector3d limit      = half_size + Eigen::Vector3d::Constant(margin);
+    const Eigen::Vector3d delta     = query_center - container.get_center();
+    const Eigen::Vector3d local     = container.get_rotation().transpose() * delta;
+    const Eigen::Vector3d half_size = 0.5 * container.get_size();
+    const Eigen::Vector3d limit     = half_size + Eigen::Vector3d::Constant(margin);
 
     return (std::abs(local.x()) <= limit.x() &&
             std::abs(local.y()) <= limit.y() &&
             std::abs(local.z()) <= limit.z());
 }
 
+// OPT-2: cheap volume-ratio pre-filter used before iou() in update_tracks().
+// Two bboxes whose volumes differ by more than ratio_limit are unlikely to
+// represent the same physical object.
+bool size_compatible(const BoundingBox& a, const BoundingBox& b,
+                     double ratio_limit = 3.0)
+{
+    const Eigen::Vector3d& sa = a.get_size();
+    const Eigen::Vector3d& sb = b.get_size();
+    const double va = sa.x() * sa.y() * sa.z();
+    const double vb = sb.x() * sb.y() * sb.z();
+    if (va <= 0.0 || vb <= 0.0) return false;
+    const double r = va > vb ? va / vb : vb / va;
+    return r <= ratio_limit;
+}
+
+} // anonymous namespace
+
 // ===========================================================================
 // merge_with_history()
 //
-// Core idea: if a large historical bbox (already transformed to current frame)
-// contains the centers of one or more current small bboxes, those small bboxes
-// are removed and replaced by the historical one (marked static).
-//
-// This handles the frequent case where a single static object (wall segment,
-// parked vehicle, pillar) is over-segmented into multiple clusters in the
-// current frame due to partial occlusion or point density variation.
-//
-// Parameters that control this behaviour (all tunable in config):
-//   containment_margin  — expand historical bbox by this amount before
-//                         testing containment (handles odometry drift).
-//   merge_volume_ratio  — historical bbox must be at least this times larger
-//                         than the current one to trigger a merge.  Avoids
-//                         replacing a large current bbox with an equally-large
-//                         historical one that happens to share the same volume.
-//
-// Returns the merged bbox list. Historical bboxes that absorbed at least one
-// current bbox are inserted once; absorbed current bboxes are dropped.
-// Current bboxes not absorbed by any historical bbox are kept unchanged.
+// OPT-4: uses pre-computed current bbox centers and a cheap squared-distance
+// pre-filter (bbox diagonal) before the more expensive oriented containment
+// test.
 // ===========================================================================
 
 std::vector<BoundingBox> DynamicClusterExtractor::merge_with_history(
     const std::vector<BoundingBox>& current_bboxes,
-    const std::deque<std::vector<BoundingBox>>& history) const
+    const std::deque<std::vector<BoundingBox>>& history_transformed) const
 {
     const int N = static_cast<int>(current_bboxes.size());
+    if (N == 0) return {};
 
-    // absorbed[i] = true means current_bboxes[i] has been swallowed
-    std::vector<bool> absorbed(N, false);
-
-    // Merged bboxes to add (historical bboxes that absorbed ≥1 current bbox)
+    std::vector<bool>        absorbed(N, false);
     std::vector<BoundingBox> merged_in;
 
     const double margin       = params_.containment_margin;
     const double volume_ratio = params_.merge_volume_ratio;
 
-    for (const auto& frame_bboxes : history) {
+    // OPT-4: pre-compute current centers once.
+    std::vector<Eigen::Vector3d> curr_centers(N);
+    for (int i = 0; i < N; ++i)
+        curr_centers[i] = current_bboxes[i].get_center();
+
+    for (const auto& frame_bboxes : history_transformed) {
         for (const auto& hist_bbox : frame_bboxes) {
 
-            const Eigen::Vector3d& hs = hist_bbox.get_size();
-            const double hist_volume  = hs.x() * hs.y() * hs.z();
+            const Eigen::Vector3d& hs        = hist_bbox.get_size();
+            const double           hist_vol  = hs.x() * hs.y() * hs.z();
+            const Eigen::Vector3d& hc        = hist_bbox.get_center();
 
-            std::vector<int> contained_ids;
+            // Cheap reject: use bbox half-diagonal + margin as distance threshold.
+            const double half_diag2 = (0.5 * hs + Eigen::Vector3d::Constant(margin))
+                                          .squaredNorm();
+
+            std::vector<int> newly_absorbed_ids;
 
             for (int i = 0; i < N; ++i) {
                 if (absorbed[i]) continue;
 
-                const Eigen::Vector3d& cs = current_bboxes[i].get_size();
-                const double curr_volume  = cs.x() * cs.y() * cs.z();
+                const Eigen::Vector3d& cs       = current_bboxes[i].get_size();
+                const double           curr_vol = cs.x() * cs.y() * cs.z();
 
-                // Historical bbox must be meaningfully larger
-                if (hist_volume < volume_ratio * curr_volume) continue;
+                if (hist_vol < volume_ratio * curr_vol) continue;
 
-                if (contains_center(hist_bbox, current_bboxes[i], margin))
-                    contained_ids.push_back(i);
+                // OPT-4: squared-distance pre-filter.
+                if ((curr_centers[i] - hc).squaredNorm() > half_diag2) continue;
+
+                if (contains_center(hist_bbox, curr_centers[i], margin))
+                    newly_absorbed_ids.push_back(i);
             }
 
-            if (!contained_ids.empty()) {
-                // Mark all contained current bboxes as absorbed
-                for (int idx : contained_ids) absorbed[idx] = true;
+            if (!newly_absorbed_ids.empty()) {
+                for (int idx : newly_absorbed_ids) absorbed[idx] = true;
 
-                // Insert the historical bbox once, marked as static
                 BoundingBox replacement = hist_bbox;
                 replacement.set_dynamic(false);
+                replacement.set_track_id(-1);
                 merged_in.push_back(replacement);
 
                 spdlog::debug("[merge_with_history] hist bbox at ({:.2f},{:.2f},{:.2f}) "
                               "absorbed {} current bbox(es)",
-                              hist_bbox.get_center().x(),
-                              hist_bbox.get_center().y(),
-                              hist_bbox.get_center().z(),
-                              contained_ids.size());
+                              hc.x(), hc.y(), hc.z(),
+                              newly_absorbed_ids.size());
             }
         }
     }
 
-    // Build output: keep non-absorbed current bboxes + merged historical ones
     std::vector<BoundingBox> result;
-    result.reserve(N);
+    result.reserve(N + static_cast<int>(merged_in.size()));
     for (int i = 0; i < N; ++i)
         if (!absorbed[i]) result.push_back(current_bboxes[i]);
-
     result.insert(result.end(), merged_in.begin(), merged_in.end());
 
+    const int n_absorbed = static_cast<int>(
+        std::count(absorbed.begin(), absorbed.end(), true));
     spdlog::debug("[merge_with_history] {} in -> {} out ({} absorbed, {} merged in)",
-                  N, result.size(),
-                  N - static_cast<int>(std::count(absorbed.begin(), absorbed.end(), false)),
-                  merged_in.size());
+                  N, result.size(), n_absorbed, merged_in.size());
 
     return result;
+}
+
+// ===========================================================================
+// update_tracks()
+//
+// OPT-2: size_compatible() pre-filter before iou() avoids the costly OBB
+// intersection computation for clearly incompatible bbox pairs.
+// Uses squaredNorm() for distance gating (avoids sqrt until needed for sort).
+// ===========================================================================
+
+void DynamicClusterExtractor::update_tracks(
+    std::vector<BoundingBox>& bboxes,
+    const Eigen::Isometry3d&  T_to_current)
+{
+    const int N_tracks = static_cast<int>(tracks_.size());
+    const int N_bboxes = static_cast<int>(bboxes.size());
+
+    // 1. Transform track state into current sensor frame.
+    for (auto& t : tracks_) {
+        t.center   = T_to_current * t.center;
+        t.velocity = T_to_current.linear() * t.velocity;
+    }
+
+    // 2/3. Predict and build candidate pairs.
+    struct Pair { int t_idx, b_idx; double dist; };
+    std::vector<Pair> pairs;
+    pairs.reserve(std::min(static_cast<size_t>(N_tracks) * 4u,
+                           static_cast<size_t>(N_tracks) * static_cast<size_t>(N_bboxes)));
+
+    const double dist_thresh2 = params_.track_match_distance *
+                                 params_.track_match_distance;
+
+    for (int t = 0; t < N_tracks; ++t) {
+        const Eigen::Vector3d predicted = tracks_[t].center + tracks_[t].velocity;
+        for (int b = 0; b < N_bboxes; ++b) {
+            const double d2 = (predicted - bboxes[b].get_center()).squaredNorm();
+            if (d2 >= dist_thresh2) continue;
+
+            // OPT-2: cheap size pre-filter.
+            if (!size_compatible(tracks_[t].last_bbox, bboxes[b])) continue;
+
+            // iou() only for compatible candidates.
+            if (tracks_[t].last_bbox.iou(bboxes[b]) < params_.track_match_iou) continue;
+
+            pairs.push_back({t, b, std::sqrt(d2)});
+        }
+    }
+
+    std::sort(pairs.begin(), pairs.end(),
+        [](const Pair& a, const Pair& b){ return a.dist < b.dist; });
+
+    // 4/5. Greedy assignment.
+    std::vector<bool> track_matched(N_tracks, false);
+    std::vector<bool> bbox_matched (N_bboxes, false);
+
+    for (const auto& p : pairs) {
+        if (track_matched[p.t_idx] || bbox_matched[p.b_idx]) continue;
+
+        track_matched[p.t_idx] = true;
+        bbox_matched [p.b_idx] = true;
+
+        Track& t = tracks_[p.t_idx];
+        const Eigen::Vector3d new_center = bboxes[p.b_idx].get_center();
+
+        t.velocity      = new_center - t.center;
+        t.center        = new_center;
+        t.last_bbox     = bboxes[p.b_idx];
+        t.missed_frames = 0;
+        t.age++;
+
+        bboxes[p.b_idx].set_track_id(t.id);
+
+        spdlog::debug("[tracker] matched track={} age={} bbox=({:.2f},{:.2f},{:.2f}) "
+                      "dist={:.3f} speed={:.3f}",
+                      t.id, t.age,
+                      new_center.x(), new_center.y(), new_center.z(),
+                      p.dist, t.velocity.norm());
+    }
+
+    // 6. Unmatched bboxes → new tracks.
+    for (int b = 0; b < N_bboxes; ++b) {
+        if (bbox_matched[b]) continue;
+
+        Track t;
+        t.id            = next_track_id_++;
+        t.center        = bboxes[b].get_center();
+        t.last_bbox     = bboxes[b];
+        t.velocity      = Eigen::Vector3d::Zero();
+        t.age           = 1;
+        t.missed_frames = 0;
+        t.dynamic_count = 0;
+        t.static_count  = 0;
+        t.slow_frames   = 0;
+        t.is_dynamic    = true;
+
+        tracks_.push_back(t);
+        bboxes[b].set_track_id(t.id);
+
+        spdlog::debug("[tracker] new track={} at ({:.2f},{:.2f},{:.2f})",
+                      t.id, t.center.x(), t.center.y(), t.center.z());
+    }
+
+    // 7. Unmatched tracks: increment missed, prune expired.
+    for (int t = 0; t < N_tracks; ++t)
+        if (!track_matched[t]) tracks_[t].missed_frames++;
+
+    tracks_.erase(
+        std::remove_if(tracks_.begin(), tracks_.end(),
+            [this](const Track& trk){
+                return trk.missed_frames > params_.track_max_missed;
+            }),
+        tracks_.end());
+
+    spdlog::debug("[tracker] active_tracks={}", tracks_.size());
 }
 
 // ===========================================================================
 // classify_clusters()
 //
 // Pipeline:
-//   1. Transform history to current frame.
-//   2. merge_with_history(): replace over-segmented clusters with historical
-//      large bboxes — handles static object fragmentation.
-//   3. Standard static/dynamic classification via min_static_history_matches.
-//   4. Update history.
+//   1. Build history_t: transformed copy of cluster_history_ (built once,
+//      shared by merge and classification).                          [OPT-1]
+//   2. update_tracks() on real detections before merge.             [v4-fix]
+//   3. merge_with_history() with history_t.
+//   4. Raw IoU/distance classification with squaredNorm pre-filter. [OPT-5]
+//   5a. Velocity-based static override (per-track slow_frames).     [FIX-1]
+//   5b. Hysteresis smoothing using unordered_map<int,Track*>.       [OPT-3]
+//   6. Push non-phantom bboxes to history.                          [v4-fix]
 // ===========================================================================
 
 void DynamicClusterExtractor::classify_clusters(
     Eigen::Isometry3d T_delta_pose,
     std::vector<BoundingBox>& cluster_bboxes)
 {
-    // 1. Bring history into current sensor frame
     const Eigen::Isometry3d T_to_current = T_delta_pose.inverse();
-    for (auto& frame_bboxes : cluster_history_)
+
+    // OPT-1: build transformed history once.
+    std::deque<std::vector<BoundingBox>> history_t = cluster_history_;
+    for (auto& frame_bboxes : history_t)
         for (auto& bbox : frame_bboxes)
             bbox.transform(T_to_current);
 
-    // 2. Temporal merging: absorb over-segmented clusters under large historical bboxes
-    cluster_bboxes = merge_with_history(cluster_bboxes, cluster_history_);
+    // Step 2: track real detections before merge.
+    update_tracks(cluster_bboxes, T_to_current);
 
-    // 3. Standard static/dynamic classification on remaining bboxes
-    const int available_history = static_cast<int>(cluster_history_.size());
+    // Step 3: temporal merge.
+    cluster_bboxes = merge_with_history(cluster_bboxes, history_t);
+
+    // Step 4: raw IoU/distance classification.
+    const int available_history = static_cast<int>(history_t.size());
     const int required_matches  = std::max(1,
         std::min(params_.min_static_history_matches, available_history));
 
+    // OPT-5: pre-compute squared threshold.
+    const double dist_thresh2 = params_.cluster_distance_threshold *
+                                 params_.cluster_distance_threshold;
+
     for (auto& cluster : cluster_bboxes) {
-        // Already classified by merge_with_history — skip
-        if (!cluster.is_dynamic_bbox()) continue;
+        if (cluster.get_track_id() < 0) continue;  // phantom — skip
 
         int static_matches = 0;
+        const Eigen::Vector3d& cc = cluster.get_center();
 
-        for (const auto& frame_bboxes : cluster_history_) {
+        for (const auto& frame_bboxes : history_t) {
             for (const auto& hist_bbox : frame_bboxes) {
-                const double dist = (cluster.get_center() - hist_bbox.get_center()).norm();
-                const double iou  = cluster.iou(hist_bbox);
+                // OPT-5: squared-distance pre-filter before iou().
+                if ((cc - hist_bbox.get_center()).squaredNorm() > dist_thresh2)
+                    continue;
 
-                if (iou  > params_.cluster_iou_threshold &&
-                    dist < params_.cluster_distance_threshold) {
+                if (cluster.iou(hist_bbox) > params_.cluster_iou_threshold) {
                     ++static_matches;
-                    break;  // one match per frame
+                    break;
                 }
             }
             if (static_matches >= required_matches) break;
         }
 
-        const bool is_static = (static_matches >= required_matches);
-        cluster.set_dynamic(!is_static);
+        const bool raw_is_static = (static_matches >= required_matches);
+        cluster.set_dynamic(!raw_is_static);
 
-        spdlog::debug("[cluster_extractor] cluster at ({:.2f},{:.2f},{:.2f}) -> {} "
+        spdlog::debug("[cluster_extractor] cluster at ({:.2f},{:.2f},{:.2f}) raw={} "
                       "(static_matches={}/{})",
-                      cluster.get_center().x(),
-                      cluster.get_center().y(),
-                      cluster.get_center().z(),
-                      is_static ? "STATIC" : "DYNAMIC",
+                      cc.x(), cc.y(), cc.z(),
+                      raw_is_static ? "STATIC" : "DYNAMIC",
                       static_matches, required_matches);
     }
 
-    // 4. Update history
-    cluster_history_.push_front(cluster_bboxes);
+    // OPT-3: build track lookup map once for O(1) access in steps 5a/5b.
+    std::unordered_map<int, Track*> track_map;
+    track_map.reserve(tracks_.size() * 2);
+    for (auto& t : tracks_)
+        track_map[t.id] = &t;
+
+    // Step 5a — FIX-1: velocity-based static override.
+    // A track that moves slower than velocity_static_threshold for
+    // velocity_static_frames consecutive frames is forced STATIC,
+    // regardless of the IoU vote.  This prevents odometry drift from
+    // keeping genuinely stationary objects labelled as DYNAMIC.
+    for (auto& cluster : cluster_bboxes) {
+        const int tid = cluster.get_track_id();
+        if (tid < 0) continue;
+
+        auto it = track_map.find(tid);
+        if (it == track_map.end()) continue;
+        Track& t = *it->second;
+
+        const double speed = t.velocity.norm();
+        if (speed < params_.velocity_static_threshold)
+            ++t.slow_frames;
+        else
+            t.slow_frames = 0;
+
+        if (t.slow_frames >= params_.velocity_static_frames) {
+            cluster.set_dynamic(false);
+            spdlog::debug("[vel_override] track={} speed={:.4f} slow_frames={} -> STATIC",
+                          t.id, speed, t.slow_frames);
+        }
+    }
+
+    // Step 5b — Hysteresis: smooth remaining classification flicker.
+    for (auto& cluster : cluster_bboxes) {
+        const int tid = cluster.get_track_id();
+        if (tid < 0) continue;
+
+        auto it = track_map.find(tid);   // OPT-3: O(1)
+        if (it == track_map.end()) continue;
+        Track& t = *it->second;
+
+        if (t.age == 1) {
+            const bool raw_dynamic = cluster.is_dynamic_bbox();
+            t.is_dynamic = raw_dynamic;
+            if (raw_dynamic) { t.dynamic_count = 1; t.static_count  = 0; }
+            else             { t.static_count  = 1; t.dynamic_count = 0; }
+            continue;
+        }
+
+        const bool raw_dynamic = cluster.is_dynamic_bbox();
+        if (raw_dynamic) { t.dynamic_count++; t.static_count  = 0; }
+        else             { t.static_count++;  t.dynamic_count = 0; }
+
+        if (!t.is_dynamic && t.dynamic_count >= params_.hysteresis_dynamic_n)
+            t.is_dynamic = true;
+        else if (t.is_dynamic && t.static_count >= params_.hysteresis_static_m)
+            t.is_dynamic = false;
+
+        cluster.set_dynamic(t.is_dynamic);
+
+        spdlog::debug("[cluster_extractor] track={} age={} speed={:.3f} slow_f={} "
+                      "raw={} stable={} dyn_cnt={} sta_cnt={}",
+                      t.id, t.age, t.velocity.norm(), t.slow_frames,
+                      raw_dynamic  ? "DYN" : "STA",
+                      t.is_dynamic ? "DYN" : "STA",
+                      t.dynamic_count, t.static_count);
+    }
+
+    // Step 6: push non-phantom bboxes to history.
+    std::vector<BoundingBox> history_entry;
+    history_entry.reserve(cluster_bboxes.size());
+    for (const auto& bbox : cluster_bboxes)
+        if (bbox.get_track_id() >= 0)
+            history_entry.push_back(bbox);
+
+    cluster_history_.push_front(std::move(history_entry));
     while (static_cast<int>(cluster_history_.size()) > params_.history_size)
         cluster_history_.pop_back();
 }

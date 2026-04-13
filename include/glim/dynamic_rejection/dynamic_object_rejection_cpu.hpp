@@ -25,22 +25,15 @@ public:
     double dynamic_score_threshold;
     double w_shift;
     double w_mahalanobis;
-    double w_covariance_difference;
-    double w_shape;
     double w_neighbor;
-    double w_occupancy;
+    double w_cluster;
+    double w_history;
     double points_limit;
     // History
     double history_factor;
     int    frame_num_memory;
-
     // Cluster propagation
     double cluster_propagation_threshold;
-    // Neighbor propagation
-    double neighbor_static_threshold;
-    
-    double w_cluster;
-    double w_history;
     // Misc
     int num_threads;
 };

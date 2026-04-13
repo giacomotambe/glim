@@ -6,13 +6,24 @@
 
 namespace glim {
 
+BoundingBox::BoundingBox()
+    : size(Eigen::Vector3d::Zero()),
+      center(Eigen::Vector3d::Zero()),
+      rotation(Eigen::Matrix3d::Identity()),
+      is_dynamic(false),
+      track_id(-1),
+      R_inv(Eigen::Matrix3d::Identity()),
+      half_size(Eigen::Vector3d::Zero())
+{}
+
 BoundingBox::BoundingBox(const Eigen::Vector3d& size,
                          const Eigen::Vector3d& center,
                          const Eigen::Matrix3d& rotation)
     : size(size),
       center(center),
       rotation(rotation),
-        is_dynamic(true)  // default to dynamic, can be set later
+      is_dynamic(true),  // default to dynamic, can be set later
+      track_id(-1)
 {
     // Precompute values used in contains()
     R_inv = rotation.transpose();
