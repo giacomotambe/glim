@@ -150,8 +150,8 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
 
     
     if (bbox_registry_) {
-        const std::vector<Eigen::Vector3d> all_centroids =
-            extract_centroids(*voxelmap, nvox);
+        // Reuse the centroid vector already computed above — no need for a second O(nvox) pass.
+        const std::vector<Eigen::Vector3d>& all_centroids = centroids;
 
         std::vector<BoundingBox> wall_bboxes;
         wall_bboxes.reserve(result.wall_planes.size()+result.floor_planes.size());
@@ -241,8 +241,6 @@ WallFilterResult WallFilter::filter(const PreprocessedFrame& frame) {
                 if (bbox.contains(voxel.mean)) {
                     empty_bboxes[j] = false;
                     voxel.is_wall = true;
-                    auto coord = voxelmap->voxel_coord(voxel.mean);
-                    spdlog::debug("[wall_filter] voxel coordinates [{}, {}, {}]", coord.x(), coord.y(), coord.z());
                     ++registry_marked;
                     break;
                 }

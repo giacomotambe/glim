@@ -3,6 +3,7 @@
 #include <deque>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 
@@ -199,7 +200,8 @@ private:
 
     std::vector<BoundingBox> merge_with_history(
         const std::vector<BoundingBox>& current_bboxes,
-        const std::deque<std::vector<BoundingBox>>& history) const;
+        const std::deque<std::vector<BoundingBox>>& history,
+        const std::unordered_set<int>& protected_track_ids) const;
     
 
 private:

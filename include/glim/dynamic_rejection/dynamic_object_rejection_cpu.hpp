@@ -23,6 +23,9 @@ public:
 public:
     // Scoring weights
     double dynamic_score_threshold;
+    double tier1_threshold_factor;          ///< Multiplier on threshold for voxels inside a CONFIRMED dynamic cluster bbox (Tier 1). Must be > w_cluster/dynamic_score_threshold to avoid unconditional detection.
+    double unconstrained_threshold_factor;  ///< Multiplier on threshold for voxels with no cluster and no dynamic history (Tier 3). Higher = fewer false positives.
+    double memory_threshold_factor;         ///< Multiplier on threshold for voxels that were dynamic last frame but have no cluster bbox (Tier 2). < 1.0 for lower threshold.
     double w_shift;
     double w_mahalanobis;
     double w_neighbor;

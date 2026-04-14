@@ -491,7 +491,8 @@ bool size_compatible(const BoundingBox& a, const BoundingBox& b,
 
 std::vector<BoundingBox> DynamicClusterExtractor::merge_with_history(
     const std::vector<BoundingBox>& current_bboxes,
-    const std::deque<std::vector<BoundingBox>>& history_transformed) const
+    const std::deque<std::vector<BoundingBox>>& history_transformed,
+    const std::unordered_set<int>& protected_track_ids) const
 {
     const int N = static_cast<int>(current_bboxes.size());
     if (N == 0) return {};
@@ -522,6 +523,13 @@ std::vector<BoundingBox> DynamicClusterExtractor::merge_with_history(
 
             for (int i = 0; i < N; ++i) {
                 if (absorbed[i]) continue;
+
+                // Never absorb bboxes that belong to established tracks (age > 1).
+                // Replacing a well-tracked cluster with a phantom at its old
+                // history position would give the downstream voxel rejector a
+                // stale, static bbox instead of the actual moved cluster.
+                if (protected_track_ids.count(current_bboxes[i].get_track_id()) > 0)
+                    continue;
 
                 const Eigen::Vector3d& cs       = current_bboxes[i].get_size();
                 const double           curr_vol = cs.x() * cs.y() * cs.z();
@@ -699,20 +707,35 @@ void DynamicClusterExtractor::classify_clusters(
 {
     const Eigen::Isometry3d T_to_current = T_delta_pose.inverse();
 
-    // OPT-1: build transformed history once.
-    std::deque<std::vector<BoundingBox>> history_t = cluster_history_;
-    for (auto& frame_bboxes : history_t)
+    // FIX: transform cluster_history_ IN-PLACE to the current sensor frame.
+    //
+    // The old code built a temporary history_t copy and applied the same
+    // single-frame delta to every history depth.  That is correct only for
+    // history[0].  Bboxes from frame t-k need the ACCUMULATED transform
+    // from t-k to t, not just from t-1 to t.  By updating in-place every
+    // frame (same pattern as update_tracks() does for track centres), the
+    // entries progressively accumulate the pose chain and are always in the
+    // current sensor frame when we read them.
+    for (auto& frame_bboxes : cluster_history_)
         for (auto& bbox : frame_bboxes)
             bbox.transform(T_to_current);
 
     // Step 2: track real detections before merge.
     update_tracks(cluster_bboxes, T_to_current);
 
-    // Step 3: temporal merge.
-    cluster_bboxes = merge_with_history(cluster_bboxes, history_t);
+    // Collect IDs of established tracks (age > 1) so merge_with_history skips them.
+    // Bboxes matched to these tracks represent well-localised, actively-tracked
+    // objects.  Replacing them with a phantom from history would give the
+    // downstream voxel rejector a stale, static bbox.
+    std::unordered_set<int> protected_track_ids;
+    for (const auto& t : tracks_)
+        if (t.age > 1) protected_track_ids.insert(t.id);
+
+    // Step 3: temporal merge (protects established tracks).
+    cluster_bboxes = merge_with_history(cluster_bboxes, cluster_history_, protected_track_ids);
 
     // Step 4: raw IoU/distance classification.
-    const int available_history = static_cast<int>(history_t.size());
+    const int available_history = static_cast<int>(cluster_history_.size());
     const int required_matches  = std::max(1,
         std::min(params_.min_static_history_matches, available_history));
 
@@ -726,7 +749,7 @@ void DynamicClusterExtractor::classify_clusters(
         int static_matches = 0;
         const Eigen::Vector3d& cc = cluster.get_center();
 
-        for (const auto& frame_bboxes : history_t) {
+        for (const auto& frame_bboxes : cluster_history_) {
             for (const auto& hist_bbox : frame_bboxes) {
                 // OPT-5: squared-distance pre-filter before iou().
                 if ((cc - hist_bbox.get_center()).squaredNorm() > dist_thresh2)
