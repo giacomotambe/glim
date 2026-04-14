@@ -24,10 +24,9 @@ struct Track {
     BoundingBox     last_bbox;      ///< Last matched bbox (for IoU gating)
     int             age;            ///< Frames the track has been alive
     int             missed_frames;  ///< Consecutive frames without a match
-    int             slow_frames;    ///< Consecutive frames with speed < velocity_static_threshold
-    int             dynamic_count;  ///< Consecutive frames raw-classified dynamic
-    int             static_count;   ///< Consecutive frames raw-classified static
-    bool            is_dynamic;     ///< Stable, hysteresis-filtered state
+    int             slow_frames;     ///< Consecutive frames with speed < velocity_static_threshold
+    double          dynamic_score;   ///< EMA score in [0,1]: 0=static, 1=dynamic
+    bool            is_dynamic;      ///< Final stable classification (score >= threshold)
 };
 
 // ===========================================================================
@@ -130,6 +129,36 @@ public:
     /// Consecutive slow frames required to force the track to static.
     /// Default: 3
     int velocity_static_frames;
+
+    // --- EMA-based classification ---
+
+    /// EMA smoothing factor for dynamic_score updates. Larger = faster response.
+    /// Default: 0.3
+    double ema_alpha;
+
+    /// Score in [0,1] above which a track is classified DYNAMIC. Default: 0.6
+    double dynamic_score_threshold;
+
+    /// Speed above which a track is definitely DYNAMIC [m/frame]. Default: 0.2
+    double velocity_dynamic_threshold;
+
+    /// Tracks younger than this many frames are kept DYNAMIC (uncertain state).
+    /// Default: 3
+    int min_track_age;
+
+    /// Fraction of history frames that must match for a track to be called static.
+    /// Replaces the fixed min_static_history_matches count. Default: 0.6
+    double static_history_ratio;
+
+    /// Low-pass filter coefficient for velocity smoothing (0=instant, 1=frozen). Default: 0.8
+    double velocity_beta;
+
+    /// Additional threshold scaling per metre of ego-motion (m/frame → scale factor).
+    /// scale = 1 + motion_scale_factor * ||translation||. Default: 2.0
+    double motion_scale_factor;
+
+    /// Distance below which a track–bbox pair is always accepted, regardless of IoU. Default: 0.5
+    double track_match_distance_strict;
 };
 
 // ===========================================================================
@@ -175,7 +204,10 @@ public:
     /// Returns a snapshot of the history as a vector-of-vectors (one per frame age).
     /// Index 0 = most recent frame, index N-1 = oldest.
     std::deque<std::vector<BoundingBox>> get_cluster_history_snapshot() const {
-        return cluster_history_;
+        std::deque<std::vector<BoundingBox>> out;
+        for (const auto& [pose, bboxes] : cluster_history_)
+            out.push_back(bboxes);
+        return out;
     }
 
 private:
@@ -196,7 +228,8 @@ private:
     /// @param T_to_current Transform that brings previous-frame coords into the
     ///                     current sensor frame (= T_delta_pose.inverse()).
     void update_tracks(std::vector<BoundingBox>& bboxes,
-                       const Eigen::Isometry3d&  T_to_current);
+                       const Eigen::Isometry3d&  T_to_current,
+                       double                    dist_scale);
 
     std::vector<BoundingBox> merge_with_history(
         const std::vector<BoundingBox>& current_bboxes,
@@ -206,11 +239,12 @@ private:
 
 private:
     DynamicClusterExtractorParams params_;
-    /// Storia degli ultimi N frame: ogni entry è il vettore di bbox in quel frame,
-    /// già aggiornate alle coordinate del frame corrente ad ogni chiamata.
-    std::deque<std::vector<BoundingBox>> cluster_history_;
     std::shared_ptr<PoseKalmanFilter> pose_kalman_filter_;
     Eigen::Isometry3d last_pose_;
+
+    /// Historia: (T_world_sensor at capture time, bboxes in sensor frame at that time).
+    /// Bboxes are stored as-is; transforms are computed on demand to avoid drift.
+    std::deque<std::pair<Eigen::Isometry3d, std::vector<BoundingBox>>> cluster_history_;
 
     /// Active tracks, maintained across frames.
     std::vector<Track> tracks_;

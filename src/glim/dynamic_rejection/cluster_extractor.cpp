@@ -82,27 +82,41 @@ DynamicClusterExtractorParams::DynamicClusterExtractorParams() {
     velocity_static_threshold = config.param<double>("dynamic_cluster_extractor", "velocity_static_threshold", 0.05);
     velocity_static_frames    = config.param<int>   ("dynamic_cluster_extractor", "velocity_static_frames",    3);
 
+    // EMA-based classification params.
+    ema_alpha                  = config.param<double>("dynamic_cluster_extractor", "ema_alpha",                  0.3);
+    dynamic_score_threshold    = config.param<double>("dynamic_cluster_extractor", "dynamic_score_threshold",    0.6);
+    velocity_dynamic_threshold = config.param<double>("dynamic_cluster_extractor", "velocity_dynamic_threshold", 0.2);
+    min_track_age              = config.param<int>   ("dynamic_cluster_extractor", "min_track_age",              3);
+    static_history_ratio       = config.param<double>("dynamic_cluster_extractor", "static_history_ratio",       0.6);
+
+    // Ego-motion robustness params.
+    velocity_beta               = config.param<double>("dynamic_cluster_extractor", "velocity_beta",               0.8);
+    motion_scale_factor         = config.param<double>("dynamic_cluster_extractor", "motion_scale_factor",         2.0);
+    track_match_distance_strict = config.param<double>("dynamic_cluster_extractor", "track_match_distance_strict", 0.5);
+
     spdlog::debug("[cluster_extractor] eps_factor={:.2f} min_pts={} knn_max={} "
                   "min_cluster_voxels={} min_points_bbox={} "
                   "bbox_extent=[{:.2f},{:.2f}] bbox_volume=[{:.3f},{:.3f}] "
                   "cluster_distance_threshold={:.2f} cluster_iou_threshold={:.2f} "
-                  "history_size={} min_static_history_matches={} "
+                  "history_size={} static_history_ratio={:.2f} "
                   "containment_margin={:.2f} merge_volume_ratio={:.2f} "
                   "track_match_distance={:.2f} track_match_iou={:.2f} "
                   "track_max_missed={} "
-                  "hysteresis_dynamic_n={} hysteresis_static_m={} "
-                  "velocity_static_threshold={:.3f} velocity_static_frames={}",
+                  "velocity_static_threshold={:.3f} velocity_static_frames={} "
+                  "velocity_dynamic_threshold={:.3f} "
+                  "ema_alpha={:.2f} dynamic_score_threshold={:.2f} min_track_age={}",
                   eps_voxel_factor, min_pts, knn_max_neighbors,
                   min_cluster_voxels, min_points_for_bbox,
                   bbox_min_extent, bbox_max_extent,
                   bbox_min_volume, bbox_max_volume,
                   cluster_distance_threshold, cluster_iou_threshold,
-                  history_size, min_static_history_matches,
+                  history_size, static_history_ratio,
                   containment_margin, merge_volume_ratio,
                   track_match_distance, track_match_iou,
                   track_max_missed,
-                  hysteresis_dynamic_n, hysteresis_static_m,
-                  velocity_static_threshold, velocity_static_frames);
+                  velocity_static_threshold, velocity_static_frames,
+                  velocity_dynamic_threshold,
+                  ema_alpha, dynamic_score_threshold, min_track_age);
 }
 
 DynamicClusterExtractorParams::~DynamicClusterExtractorParams() = default;
@@ -546,8 +560,9 @@ std::vector<BoundingBox> DynamicClusterExtractor::merge_with_history(
             if (!newly_absorbed_ids.empty()) {
                 for (int idx : newly_absorbed_ids) absorbed[idx] = true;
 
+                // Goal-6: do NOT force static here — let the EMA tracking logic decide.
+                // The replacement inherits the last stable classification from history.
                 BoundingBox replacement = hist_bbox;
-                replacement.set_dynamic(false);
                 replacement.set_track_id(-1);
                 merged_in.push_back(replacement);
 
@@ -583,7 +598,8 @@ std::vector<BoundingBox> DynamicClusterExtractor::merge_with_history(
 
 void DynamicClusterExtractor::update_tracks(
     std::vector<BoundingBox>& bboxes,
-    const Eigen::Isometry3d&  T_to_current)
+    const Eigen::Isometry3d&  T_to_current,
+    double                    dist_scale)
 {
     const int N_tracks = static_cast<int>(tracks_.size());
     const int N_bboxes = static_cast<int>(bboxes.size());
@@ -595,27 +611,36 @@ void DynamicClusterExtractor::update_tracks(
     }
 
     // 2/3. Predict and build candidate pairs.
+    // Fix-1: accept if dist < D_strict (no IoU needed)
+    //        OR   dist < D_loose AND IoU > iou_low
     struct Pair { int t_idx, b_idx; double dist; };
     std::vector<Pair> pairs;
     pairs.reserve(std::min(static_cast<size_t>(N_tracks) * 4u,
                            static_cast<size_t>(N_tracks) * static_cast<size_t>(N_bboxes)));
 
-    const double dist_thresh2 = params_.track_match_distance *
-                                 params_.track_match_distance;
+    const double D_loose  = params_.track_match_distance * dist_scale;
+    const double D_strict = params_.track_match_distance_strict * dist_scale;
+    const double D_loose2  = D_loose  * D_loose;
+    const double D_strict2 = D_strict * D_strict;
+    const double iou_low   = params_.track_match_iou * 0.4;
 
     for (int t = 0; t < N_tracks; ++t) {
         const Eigen::Vector3d predicted = tracks_[t].center + tracks_[t].velocity;
         for (int b = 0; b < N_bboxes; ++b) {
             const double d2 = (predicted - bboxes[b].get_center()).squaredNorm();
-            if (d2 >= dist_thresh2) continue;
+            if (d2 >= D_loose2) continue;
 
             // OPT-2: cheap size pre-filter.
             if (!size_compatible(tracks_[t].last_bbox, bboxes[b])) continue;
 
-            // iou() only for compatible candidates.
-            if (tracks_[t].last_bbox.iou(bboxes[b]) < params_.track_match_iou) continue;
+            if (d2 < D_strict2) {
+                pairs.push_back({t, b, std::sqrt(d2)});
+                continue;
+            }
 
-            pairs.push_back({t, b, std::sqrt(d2)});
+            const double iou_val = tracks_[t].last_bbox.iou(bboxes[b]);
+            if (iou_val >= iou_low)
+                pairs.push_back({t, b, std::sqrt(d2)});
         }
     }
 
@@ -635,7 +660,10 @@ void DynamicClusterExtractor::update_tracks(
         Track& t = tracks_[p.t_idx];
         const Eigen::Vector3d new_center = bboxes[p.b_idx].get_center();
 
-        t.velocity      = new_center - t.center;
+        // Fix-3: low-pass filter on velocity to prevent noise-induced false dynamics.
+        const Eigen::Vector3d raw_vel = new_center - t.center;
+        t.velocity      = params_.velocity_beta * t.velocity
+                        + (1.0 - params_.velocity_beta) * raw_vel;
         t.center        = new_center;
         t.last_bbox     = bboxes[p.b_idx];
         t.missed_frames = 0;
@@ -661,10 +689,9 @@ void DynamicClusterExtractor::update_tracks(
         t.velocity      = Eigen::Vector3d::Zero();
         t.age           = 1;
         t.missed_frames = 0;
-        t.dynamic_count = 0;
-        t.static_count  = 0;
-        t.slow_frames   = 0;
+        t.dynamic_score = 1.0;   // new tracks start uncertain (dynamic until proven static)
         t.is_dynamic    = true;
+        t.slow_frames   = 0;
 
         tracks_.push_back(t);
         bboxes[b].set_track_id(t.id);
@@ -691,13 +718,11 @@ void DynamicClusterExtractor::update_tracks(
 // classify_clusters()
 //
 // Pipeline:
-//   1. Build history_t: transformed copy of cluster_history_ (built once,
-//      shared by merge and classification).                          [OPT-1]
+//   1. Transform cluster_history_ in-place to current sensor frame. [OPT-1]
 //   2. update_tracks() on real detections before merge.             [v4-fix]
-//   3. merge_with_history() with history_t.
-//   4. Raw IoU/distance classification with squaredNorm pre-filter. [OPT-5]
-//   5a. Velocity-based static override (per-track slow_frames).     [FIX-1]
-//   5b. Hysteresis smoothing using unordered_map<int,Track*>.       [OPT-3]
+//   3. merge_with_history() (protected tracks not replaced).
+//   4+5. Per-bbox: IoU ratio (step 4, OPT-5), velocity zones (5a),
+//        EMA dynamic_score update (5b), age guard.        [OPT-3,OPT-5,FIX-1]
 //   6. Push non-phantom bboxes to history.                          [v4-fix]
 // ===========================================================================
 
@@ -707,21 +732,29 @@ void DynamicClusterExtractor::classify_clusters(
 {
     const Eigen::Isometry3d T_to_current = T_delta_pose.inverse();
 
-    // FIX: transform cluster_history_ IN-PLACE to the current sensor frame.
-    //
-    // The old code built a temporary history_t copy and applied the same
-    // single-frame delta to every history depth.  That is correct only for
-    // history[0].  Bboxes from frame t-k need the ACCUMULATED transform
-    // from t-k to t, not just from t-1 to t.  By updating in-place every
-    // frame (same pattern as update_tracks() does for track centres), the
-    // entries progressively accumulate the pose chain and are always in the
-    // current sensor frame when we read them.
-    for (auto& frame_bboxes : cluster_history_)
-        for (auto& bbox : frame_bboxes)
-            bbox.transform(T_to_current);
+    // Fix-2: compute ego-motion magnitude to adaptively scale distance thresholds.
+    const double motion      = T_delta_pose.translation().norm();
+    const double dist_scale  = 1.0 + params_.motion_scale_factor * motion;
 
-    // Step 2: track real detections before merge.
-    update_tracks(cluster_bboxes, T_to_current);
+    // Fix-6: Build transformed history on demand using stored poses.
+    // Each entry was captured at stored_pose (= T_world_sensor at that time).
+    // T_k_to_current = stored_pose * last_pose_.inverse()
+    // (consistent with T_to_current = T_world_sensor(t-1) * T_world_sensor(t).inverse())
+    // This avoids incremental drift from repeated single-frame transforms.
+    std::deque<std::vector<BoundingBox>> history_transformed;
+    for (const auto& [stored_pose, frame_bboxes] : cluster_history_) {
+        const Eigen::Isometry3d T_k = stored_pose * last_pose_.inverse();
+        history_transformed.emplace_back();
+        history_transformed.back().reserve(frame_bboxes.size());
+        for (const auto& bbox : frame_bboxes) {
+            BoundingBox tb = bbox;
+            tb.transform(T_k);
+            history_transformed.back().push_back(std::move(tb));
+        }
+    }
+
+    // Step 2: track real detections before merge (with motion-scaled thresholds).
+    update_tracks(cluster_bboxes, T_to_current, dist_scale);
 
     // Collect IDs of established tracks (age > 1) so merge_with_history skips them.
     // Bboxes matched to these tracks represent well-localised, actively-tracked
@@ -732,123 +765,113 @@ void DynamicClusterExtractor::classify_clusters(
         if (t.age > 1) protected_track_ids.insert(t.id);
 
     // Step 3: temporal merge (protects established tracks).
-    cluster_bboxes = merge_with_history(cluster_bboxes, cluster_history_, protected_track_ids);
+    cluster_bboxes = merge_with_history(cluster_bboxes, history_transformed, protected_track_ids);
 
-    // Step 4: raw IoU/distance classification.
-    const int available_history = static_cast<int>(cluster_history_.size());
-    const int required_matches  = std::max(1,
-        std::min(params_.min_static_history_matches, available_history));
-
-    // OPT-5: pre-compute squared threshold.
-    const double dist_thresh2 = params_.cluster_distance_threshold *
-                                 params_.cluster_distance_threshold;
-
-    for (auto& cluster : cluster_bboxes) {
-        if (cluster.get_track_id() < 0) continue;  // phantom — skip
-
-        int static_matches = 0;
-        const Eigen::Vector3d& cc = cluster.get_center();
-
-        for (const auto& frame_bboxes : cluster_history_) {
-            for (const auto& hist_bbox : frame_bboxes) {
-                // OPT-5: squared-distance pre-filter before iou().
-                if ((cc - hist_bbox.get_center()).squaredNorm() > dist_thresh2)
-                    continue;
-
-                if (cluster.iou(hist_bbox) > params_.cluster_iou_threshold) {
-                    ++static_matches;
-                    break;
-                }
-            }
-            if (static_matches >= required_matches) break;
-        }
-
-        const bool raw_is_static = (static_matches >= required_matches);
-        cluster.set_dynamic(!raw_is_static);
-
-        spdlog::debug("[cluster_extractor] cluster at ({:.2f},{:.2f},{:.2f}) raw={} "
-                      "(static_matches={}/{})",
-                      cc.x(), cc.y(), cc.z(),
-                      raw_is_static ? "STATIC" : "DYNAMIC",
-                      static_matches, required_matches);
-    }
-
-    // OPT-3: build track lookup map once for O(1) access in steps 5a/5b.
+    // OPT-3: build track lookup map once for O(1) access in the classification loop.
     std::unordered_map<int, Track*> track_map;
     track_map.reserve(tracks_.size() * 2);
     for (auto& t : tracks_)
         track_map[t.id] = &t;
 
-    // Step 5a — FIX-1: velocity-based static override.
-    // A track that moves slower than velocity_static_threshold for
-    // velocity_static_frames consecutive frames is forced STATIC,
-    // regardless of the IoU vote.  This prevents odometry drift from
-    // keeping genuinely stationary objects labelled as DYNAMIC.
+    // OPT-5: pre-compute squared distance threshold (motion-scaled for Fix-2).
+    const double eff_cluster_dist  = params_.cluster_distance_threshold * dist_scale;
+    const double dist_thresh2      = eff_cluster_dist * eff_cluster_dist;
+    // Fix-5: small tolerance for center-based history match (avoids sole IoU reliance).
+    const double center_tol        = params_.containment_margin + 0.1;
+    const double center_tol2       = center_tol * center_tol;
+    const int available_history = static_cast<int>(history_transformed.size());
+
+    // Steps 4+5: combined IoU-ratio + velocity-zone + EMA classification.
+    //
+    // For each tracked bbox:
+    //   4.  Count IoU matches across all history frames → static_ratio.
+    //       (No early break: we need the full count for a meaningful ratio.)
+    //   5a. Velocity zone:
+    //         < velocity_static_threshold  → static evidence (accumulate slow_frames)
+    //         > velocity_dynamic_threshold → dynamic evidence (reset slow_frames)
+    //         in between                   → intermediate (decay slow_frames by 1)
+    //   5b. EMA update:  score = (1-α)*score + α*observation
+    //       where observation = 0.5*iou_obs + 0.5*vel_obs  (0=static, 1=dynamic)
+    //   Age guard: tracks younger than min_track_age are forced DYNAMIC (uncertain).
     for (auto& cluster : cluster_bboxes) {
         const int tid = cluster.get_track_id();
-        if (tid < 0) continue;
-
-        auto it = track_map.find(tid);
-        if (it == track_map.end()) continue;
-        Track& t = *it->second;
-
-        const double speed = t.velocity.norm();
-        if (speed < params_.velocity_static_threshold)
-            ++t.slow_frames;
-        else
-            t.slow_frames = 0;
-
-        if (t.slow_frames >= params_.velocity_static_frames) {
-            cluster.set_dynamic(false);
-            spdlog::debug("[vel_override] track={} speed={:.4f} slow_frames={} -> STATIC",
-                          t.id, speed, t.slow_frames);
-        }
-    }
-
-    // Step 5b — Hysteresis: smooth remaining classification flicker.
-    for (auto& cluster : cluster_bboxes) {
-        const int tid = cluster.get_track_id();
-        if (tid < 0) continue;
+        if (tid < 0) continue;  // phantom — classification inherited from history
 
         auto it = track_map.find(tid);   // OPT-3: O(1)
-        if (it == track_map.end()) continue;
+        if (it == track_map.end()) {
+            cluster.set_dynamic(true);
+            continue;
+        }
         Track& t = *it->second;
 
-        if (t.age == 1) {
-            const bool raw_dynamic = cluster.is_dynamic_bbox();
-            t.is_dynamic = raw_dynamic;
-            if (raw_dynamic) { t.dynamic_count = 1; t.static_count  = 0; }
-            else             { t.static_count  = 1; t.dynamic_count = 0; }
+        // --- Age guard: young tracks are unreliable, keep them dynamic ---
+        if (t.age < params_.min_track_age) {
+            cluster.set_dynamic(true);
+            spdlog::debug("[classifier] track={} age={} < min_track_age={} -> UNCERTAIN/DYNAMIC",
+                          t.id, t.age, params_.min_track_age);
             continue;
         }
 
-        const bool raw_dynamic = cluster.is_dynamic_bbox();
-        if (raw_dynamic) { t.dynamic_count++; t.static_count  = 0; }
-        else             { t.static_count++;  t.dynamic_count = 0; }
+        // --- Step 4: IoU history ratio (OPT-5 + Fix-5 relaxed center fallback) ---
+        int static_matches = 0;
+        const Eigen::Vector3d& cc = cluster.get_center();
+        for (const auto& frame_bboxes : history_transformed) {
+            for (const auto& hist_bbox : frame_bboxes) {
+                const double d2_h = (cc - hist_bbox.get_center()).squaredNorm();
+                if (d2_h > dist_thresh2) continue;
+                // Fix-5: accept if IoU > threshold OR center within small tolerance.
+                if (cluster.iou(hist_bbox) > params_.cluster_iou_threshold ||
+                    d2_h < center_tol2) {
+                    ++static_matches;
+                    break;
+                }
+            }
+        }
+        const double static_ratio  = available_history > 0
+            ? static_cast<double>(static_matches) / available_history : 0.0;
+        const double iou_obs = (static_ratio >= params_.static_history_ratio) ? 0.0 : 1.0;
 
-        if (!t.is_dynamic && t.dynamic_count >= params_.hysteresis_dynamic_n)
-            t.is_dynamic = true;
-        else if (t.is_dynamic && t.static_count >= params_.hysteresis_static_m)
-            t.is_dynamic = false;
+        // --- Step 5a: velocity zones ---
+        const double speed = t.velocity.norm();
+        double vel_obs;
+        if (speed < params_.velocity_static_threshold) {
+            ++t.slow_frames;
+            vel_obs = 0.0;  // static evidence
+        } else if (speed > params_.velocity_dynamic_threshold) {
+            t.slow_frames = 0;
+            vel_obs = 1.0;  // dynamic evidence
+        } else {
+            // Intermediate zone: gradual decay — do not hard-reset slow_frames.
+            if (t.slow_frames > 0) --t.slow_frames;
+            vel_obs = (speed - params_.velocity_static_threshold) /
+                      (params_.velocity_dynamic_threshold - params_.velocity_static_threshold);
+        }
 
+        // --- Step 5b: EMA update and final decision ---
+        const double observation = 0.5 * iou_obs + 0.5 * vel_obs;
+        t.dynamic_score = (1.0 - params_.ema_alpha) * t.dynamic_score
+                        + params_.ema_alpha * observation;
+        t.is_dynamic = (t.dynamic_score >= params_.dynamic_score_threshold);
         cluster.set_dynamic(t.is_dynamic);
 
-        spdlog::debug("[cluster_extractor] track={} age={} speed={:.3f} slow_f={} "
-                      "raw={} stable={} dyn_cnt={} sta_cnt={}",
-                      t.id, t.age, t.velocity.norm(), t.slow_frames,
-                      raw_dynamic  ? "DYN" : "STA",
-                      t.is_dynamic ? "DYN" : "STA",
-                      t.dynamic_count, t.static_count);
+        spdlog::debug("[classifier] track={} age={} speed={:.3f} slow_f={} "
+                      "iou_obs={:.2f}(ratio={:.2f}) vel_obs={:.2f} "
+                      "score={:.3f} -> {}",
+                      t.id, t.age, speed, t.slow_frames,
+                      iou_obs, static_ratio, vel_obs,
+                      t.dynamic_score,
+                      t.is_dynamic ? "DYN" : "STA");
     }
 
-    // Step 6: push non-phantom bboxes to history.
+    // Step 6: push non-phantom bboxes to history with current pose.
+    // Bboxes are stored in current sensor frame; last_pose_ is T_world_sensor(t).
     std::vector<BoundingBox> history_entry;
     history_entry.reserve(cluster_bboxes.size());
     for (const auto& bbox : cluster_bboxes)
         if (bbox.get_track_id() >= 0)
             history_entry.push_back(bbox);
 
-    cluster_history_.push_front(std::move(history_entry));
+    cluster_history_.push_front({last_pose_, std::move(history_entry)});
     while (static_cast<int>(cluster_history_.size()) > params_.history_size)
         cluster_history_.pop_back();
 }
