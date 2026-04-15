@@ -391,57 +391,27 @@ DynamicClusterExtractor::compute_bounding_boxes(
 }
 
 // ===========================================================================
-// createOBB()  —  2D-PCA OBB (XY plane, Z world-vertical)
+// createOBB()  —  AABB (axis-aligned, single pass over points)
 // ===========================================================================
 
 bool DynamicClusterExtractor::createOBB(
     const std::vector<Eigen::Vector4d>& cluster,
     BoundingBox& out_bbox) const
 {
-    const int N = static_cast<int>(cluster.size());
+    Eigen::Vector3d pt_min( std::numeric_limits<double>::max(),
+                             std::numeric_limits<double>::max(),
+                             std::numeric_limits<double>::max());
+    Eigen::Vector3d pt_max(-std::numeric_limits<double>::max(),
+                           -std::numeric_limits<double>::max(),
+                           -std::numeric_limits<double>::max());
 
-    Eigen::Vector2d mean2d = Eigen::Vector2d::Zero();
-    double z_min =  std::numeric_limits<double>::max();
-    double z_max = -std::numeric_limits<double>::max();
     for (const auto& p : cluster) {
-        mean2d += p.head<2>();
-        z_min = std::min(z_min, p.z());
-        z_max = std::max(z_max, p.z());
-    }
-    mean2d /= static_cast<double>(N);
-
-    Eigen::Matrix2d cov2d = Eigen::Matrix2d::Zero();
-    for (const auto& p : cluster) {
-        Eigen::Vector2d d = p.head<2>() - mean2d;
-        cov2d += d * d.transpose();
-    }
-    cov2d /= static_cast<double>(N);
-
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solver(cov2d);
-    const Eigen::Matrix2d R2d = solver.eigenvectors();
-
-    Eigen::Vector2d local_min( std::numeric_limits<double>::max(),
-                                std::numeric_limits<double>::max());
-    Eigen::Vector2d local_max(-std::numeric_limits<double>::max(),
-                              -std::numeric_limits<double>::max());
-    for (const auto& p : cluster) {
-        Eigen::Vector2d local = R2d.transpose() * (p.head<2>() - mean2d);
-        local_min = local_min.cwiseMin(local);
-        local_max = local_max.cwiseMax(local);
+        pt_min = pt_min.cwiseMin(p.head<3>());
+        pt_max = pt_max.cwiseMax(p.head<3>());
     }
 
-    const Eigen::Vector2d size2d         = local_max - local_min;
-    const Eigen::Vector2d center2d_local = 0.5 * (local_min + local_max);
-    const Eigen::Vector2d center2d       = R2d * center2d_local + mean2d;
-
-    Eigen::Matrix3d R3d = Eigen::Matrix3d::Identity();
-    R3d.block<2,2>(0,0) = R2d;
-
-    const double z_size   = z_max - z_min;
-    const double z_center = 0.5 * (z_min + z_max);
-
-    const Eigen::Vector3d size  (size2d.x(), size2d.y(), z_size);
-    const Eigen::Vector3d center(center2d.x(), center2d.y(), z_center);
+    const Eigen::Vector3d size   = pt_max - pt_min;
+    const Eigen::Vector3d center = 0.5 * (pt_min + pt_max);
 
     const double min_dim = size.minCoeff();
     const double max_dim = size.maxCoeff();
@@ -452,7 +422,7 @@ bool DynamicClusterExtractor::createOBB(
     if (params_.bbox_min_volume > 0.0 && volume < params_.bbox_min_volume)  return false;
     if (params_.bbox_max_volume < 1e8 && volume > params_.bbox_max_volume)  return false;
 
-    out_bbox = BoundingBox(size, center, R3d);
+    out_bbox = BoundingBox(size, center, Eigen::Matrix3d::Identity());
     return true;
 }
 
