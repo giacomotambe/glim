@@ -1,0 +1,15 @@
+{
+  "wall_filter": {
+      "voxel_resolution": 0.25,
+      "ransac_max_iterations": 100,
+      "ransac_inlier_threshold": 0.07,
+      "ransac_min_inliers": 30,
+      "ransac_confidence": 0.99,
+      "wall_vertical_angle_deg": 5.0,
+      "floor_ceiling_angle_deg": 0.0,
+      "floor_min_inliers": 250,
+      "floor_height_threshold": 0.3,
+      "max_planes": 8,
+      "wall_bbox_max_aspect_ratio": 5.0
+    }
+}

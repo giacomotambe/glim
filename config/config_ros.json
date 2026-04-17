@@ -14,8 +14,8 @@
   //
   // --- TF config ---
   // GLIM publishes TF subtrees "map -> odom -> base_frame" and "imu -> lidar".
-  // imu_frame_id           : IMU frame ID (If blank, auto-detected from IMU topic)
-  // lidar_frame_id         : LiDAR frame ID (If blank, auto-detected from points topic)
+  // imu_frame_id           : IMU frame ID
+  // lidar_frame_id         : LiDAR frame ID
   // base_frame_id          : Base frame ID. If blank, IMU frame ID is used.
   // odom_frame_id          : Odometry frame ID
   // map_frame_id           : Map frame ID
@@ -29,20 +29,6 @@
   // imu_topic              : IMU topic
   // points_topic           : Points topic
   // image_topic            : Image topic (required for only extension modules)
-  //
-  // --- QoS options ---
-  // imu_qos                : QoS options for IMU topic subscription.
-  //   profile              : Builtin QoS profile name. Could be one of the following:
-  //                          default, system_default, sensor_data, services_default, parameters, parameter_events
-  //   depth                : Size of the message queue.
-  //   durability           : Durability QoS policy setting. Could be one of the following:
-  //                          system_default, transient_local, volatile
-  //   reliability          : Reliabiilty QoS policy setting. Could be one of the following:
-  //                          system_default, reliable, best_effort
-  //   history              : History QoS policy setting. Could be one of the following:
-  //                          system_default, keep_last, keep_all
-  // points_qos             : QoS options for points topic subscription. See imu_qos for details.
-  // image_qos              : QoS options for image topic subscription. See imu_qos for details.
   "glim_ros": {
     // Backend modules
     "enable_local_mapping": true,
@@ -51,37 +37,47 @@
     "keep_raw_points": false,
     // IMU config
     "imu_time_offset": 0.0,
-    "points_time_offset": 0.0,
-    "acc_scale": 0.0, // Auto-detect if zero
+    "points_time_offset": 1.0,
+    "acc_scale": 1.0,
     // TF config
-    "imu_frame_id": "imu_link", // Auto-detect if blank
-    "lidar_frame_id": "lidar_link", // Auto-detect if blank
-    "base_frame_id": "camera_link", // If blank, IMU frame ID is used
+    "imu_frame_id": "imu_link",
+    "lidar_frame_id": "velodyne",
+    "base_frame_id": "",
     "odom_frame_id": "odom",
     "map_frame_id": "map",
-    "publish_imu2lidar": true,
+    "publish_imu2lidar": false,  
     "tf_time_offset": 1e-6,
     // Extension modules
     "extension_modules": [
       "libmemory_monitor.so",
       "libstandard_viewer.so",
       "librviz_viewer.so"
+      // "libdynamic_rejection_viewer.so"
       // "libimu_validator.so"
     ],
     // Topics
     "imu_topic": "/imu/data",
-    "points_topic": "/velodyne_points/points",
-    "image_topic": "/camera/image",
+    "points_topic": "/velodyne_points",
+    "image_topic": "/camera1/rs1/color/image_raw",
+    "bbox_topic": "/bounding_boxes",
+
+
+    // Dynamic rejection type
+    "dynamic_rejection_type": "VOXEL", // "BBOX" / "VOXEL" / "NONE"
+
+    // "imu_topic": "/imu/data",
+    // "points_topic": "/velodyne_points/points",
+    // "image_topic": "/camera/image",
+    
     // QoS options
-    "imu_qos": {
-      "profile": "sensor_data",
-      "depth": 1000
+   "imu_qos": {
+      "reliability": "reliable"
     },
     "points_qos": {
-      "profile": "sensor_data"
+      "reliability": "reliable"
     },
     "image_qos": {
-      "profile": "sensor_data"
+      "reliability": "reliable"
     }
   }
 }
