@@ -45,8 +45,8 @@
     "motion_scale_factor":        2.0,
 
     "_comment_ema": "=== EMA dynamic score ===",
-    "ema_alpha":               0.5,
-    "dynamic_score_threshold": 0.6,
+    "ema_alpha":               0.8,
+    "dynamic_score_threshold": 0.5,
     "min_track_age":           3
 
   }

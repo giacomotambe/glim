@@ -192,7 +192,7 @@ std::vector<BoundingBox> DynamicClusterExtractor::extract_clusters(
     spdlog::debug("[cluster_extractor] {} bboxes after NMS", bboxes.size());
 
     if (pose_kalman_filter_) {
-        Eigen::Isometry3d cur_pose = pose_kalman_filter_->getDeltaPose();
+        Eigen::Isometry3d cur_pose = pose_kalman_filter_->getPose();
         Eigen::Isometry3d T_delta  = cur_pose * last_pose_.inverse();
         last_pose_ = cur_pose;
         classify_clusters(T_delta, bboxes);
@@ -735,7 +735,7 @@ void DynamicClusterExtractor::classify_clusters(
         if (t.age > 1) protected_track_ids.insert(t.id);
 
     // Step 3: temporal merge (protects established tracks).
-    cluster_bboxes = merge_with_history(cluster_bboxes, history_transformed, protected_track_ids);
+    //cluster_bboxes = merge_with_history(cluster_bboxes, history_transformed, protected_track_ids);
 
     // OPT-3: build track lookup map once for O(1) access in the classification loop.
     std::unordered_map<int, Track*> track_map;
