@@ -22,7 +22,7 @@ namespace glim {
 CloudPreprocessorParams::CloudPreprocessorParams() {
   Config config(GlobalConfig::get_config_path("config_preprocess"));
   Config sensor_config(GlobalConfig::get_config_path("config_sensors"));
-
+  Config ros_config(GlobalConfig::get_config_path("config_ros"));
   global_shutter = sensor_config.param<bool>("sensors", "global_shutter_lidar", false);
 
   distance_near_thresh = config.param<double>("preprocess", "distance_near_thresh", 1.0);
@@ -40,6 +40,8 @@ CloudPreprocessorParams::CloudPreprocessorParams() {
   crop_bbox_min.setZero();
   crop_bbox_max.setZero();
 
+
+  dynamic_rejection_type = ros_config.param<std::string>("glim_ros", "dynamic_rejection_type", "NONE");
   if (enable_cropbox_filter) {
     Eigen::Isometry3d T_lidar_imu = sensor_config.param<Eigen::Isometry3d>("sensors", "T_lidar_imu", Eigen::Isometry3d::Identity());
     T_imu_lidar = T_lidar_imu.inverse();
@@ -180,7 +182,9 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::Const
   }
 
   preprocessed->k_neighbors = params.k_correspondences;
-  //preprocessed->neighbors = find_neighbors(frame->points, frame->size(), params.k_correspondences);
+  if (params.dynamic_rejection_type == "NONE") {
+    preprocessed->neighbors = find_neighbors(frame->points, frame->size(), params.k_correspondences);
+  }
 
   spdlog::trace("preprocessed: {} -> {} points", raw_points->size(), preprocessed->size());
 

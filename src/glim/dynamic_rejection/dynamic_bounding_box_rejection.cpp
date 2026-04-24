@@ -17,8 +17,12 @@
 #include <tbb/parallel_for.h>
 #endif
 namespace glim {
-DynamicBBoxRejection::DynamicBBoxRejection(const std::vector<BoundingBox>& bbox) : bboxes_(bbox) {}
-DynamicBBoxRejection::DynamicBBoxRejection() : DynamicBBoxRejection(std::vector<BoundingBox>()) {}
+DynamicBBoxRejection::DynamicBBoxRejection(const std::vector<BoundingBox>& bbox,
+                                           const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter)
+    : bboxes_(bbox), pose_kalman_filter_(pose_kalman_filter) {}
+
+DynamicBBoxRejection::DynamicBBoxRejection(const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter)
+    : DynamicBBoxRejection(std::vector<BoundingBox>(), pose_kalman_filter) {}
 
 DynamicBBoxRejection::~DynamicBBoxRejection() = default;
 
@@ -84,6 +88,8 @@ PreprocessedFrame::Ptr DynamicBBoxRejection::reject(const PreprocessedFrame::Ptr
 }
 
 void DynamicBBoxRejection::insert_bounding_boxes(BoundingBox& bbox) {
+    Eigen::Isometry3d T_world_lidar = pose_kalman_filter_ ? pose_kalman_filter_->getPose() : Eigen::Isometry3d::Identity();
+    bbox.transform(T_world_lidar);
     bboxes_.push_back(bbox);
 }
 

@@ -1,6 +1,8 @@
 #include <memory>
 #include <vector>
+#include <Eigen/Geometry>
 #include <glim/dynamic_rejection/bounding_box.hpp>
+#include <glim/dynamic_rejection/transformation_kalman_filter.hpp>
 #include <glim/preprocess/preprocessed_frame.hpp>
 
 namespace glim {
@@ -9,8 +11,9 @@ public:
     using Ptr = std::shared_ptr<DynamicBBoxRejection>;
     using ConstPtr = std::shared_ptr<const DynamicBBoxRejection>;
 
-    DynamicBBoxRejection(const std::vector<BoundingBox>& bbox);
-    DynamicBBoxRejection();
+    DynamicBBoxRejection(const std::vector<BoundingBox>& bbox,
+                         const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter = nullptr);
+    explicit DynamicBBoxRejection(const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter = nullptr);
     ~DynamicBBoxRejection();
 
     /**
@@ -27,7 +30,8 @@ private:
     std::vector<int> find_neighbors(const Eigen::Vector4d* points, const int num_points, const int k) const;
 private:
     std::vector<BoundingBox> bboxes_;
-    PreprocessedFrame::Ptr last_dynamic_frame = nullptr; ///< last frame containing only dynamic points (for visualization or other purposes)
+    PreprocessedFrame::Ptr last_dynamic_frame = nullptr;
+    std::shared_ptr<PoseKalmanFilter> pose_kalman_filter_;
 };  
 
 }  // namespace glim    
