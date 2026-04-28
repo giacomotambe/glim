@@ -17,12 +17,13 @@
 #include <tbb/parallel_for.h>
 #endif
 namespace glim {
-DynamicBBoxRejection::DynamicBBoxRejection(const std::vector<BoundingBox>& bbox,
-                                           const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter)
-    : bboxes_(bbox), pose_kalman_filter_(pose_kalman_filter) {}
+DynamicBBoxRejection::DynamicBBoxRejection(const std::vector<BoundingBox>& bbox)
+    : bboxes_(bbox) {
+    Config config(GlobalConfig::get_config_path("config_bbox_rejection"));
+    inflate_margin_ = config.param<double>("param_bbox_rejection", "inflate_margin", 0.0);
+    spdlog::info("DynamicBBoxRejection: inflate_margin = {}", inflate_margin_);
+}
 
-DynamicBBoxRejection::DynamicBBoxRejection(const std::shared_ptr<PoseKalmanFilter>& pose_kalman_filter)
-    : DynamicBBoxRejection(std::vector<BoundingBox>(), pose_kalman_filter) {}
 
 DynamicBBoxRejection::~DynamicBBoxRejection() = default;
 
@@ -88,8 +89,7 @@ PreprocessedFrame::Ptr DynamicBBoxRejection::reject(const PreprocessedFrame::Ptr
 }
 
 void DynamicBBoxRejection::insert_bounding_boxes(BoundingBox& bbox) {
-    Eigen::Isometry3d T_world_lidar = pose_kalman_filter_ ? pose_kalman_filter_->getPose() : Eigen::Isometry3d::Identity();
-    bbox.transform(T_world_lidar);
+    bbox.inflate(inflate_margin_);
     bboxes_.push_back(bbox);
 }
 
