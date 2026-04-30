@@ -106,6 +106,7 @@ DynamicRejectionResult DynamicObjectRejectionCPU::reject(
         spdlog::debug("[dynamic_rejection] first frame — storing reference voxelmap");
         voxelmap_history_.push_back(wf_result.voxelmap);
         pose_history_.push_back(pose_kalman_filter_->getPose());
+        last_pose_ = pose_kalman_filter_->getPose();
         last_dynamic_frame_ = nullptr;
         result.static_frame  = source_frame;
         result.dynamic_frame = nullptr;
@@ -263,7 +264,7 @@ void DynamicObjectRejectionCPU::score_voxels(
         // search the 26 neighbouring cells and pick the nearest centroid.
         // Bounded cost (≤ 26 lookups); tolerates up to one full voxel of drift.
         if (prev_idx < 0) {
-            const double max_dist2 = (2.0 / inv_res) * (2.0 / inv_res); // (2 * voxel_res)²
+            const double max_dist2 = (2.0 / inv_res) * (2.0 / inv_res); // (2 * voxel_res)^2
             double best_dist2      = max_dist2;
             for (int dx = -1; dx <= 1; ++dx)
             for (int dy = -1; dy <= 1; ++dy)
@@ -285,8 +286,8 @@ void DynamicObjectRejectionCPU::score_voxels(
             // avoid large blobs from a first-frame appearance of a static object
             // inside a misclassified bbox.
             // For Tier-2/3 treat as inconclusive (static by default).
-            cur.is_dynamic    = false;
-            cur.dynamic_score = 0.0;
+            cur.is_dynamic    = true;
+            cur.dynamic_score = 1.0;
             return;
         }
 
