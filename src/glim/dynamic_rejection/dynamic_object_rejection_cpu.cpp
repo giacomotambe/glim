@@ -285,8 +285,8 @@ void DynamicObjectRejectionCPU::score_voxels(
             // avoid large blobs from a first-frame appearance of a static object
             // inside a misclassified bbox.
             // For Tier-2/3 treat as inconclusive (static by default).
-            cur.is_dynamic    = false;
-            cur.dynamic_score = 0.0;
+            cur.is_dynamic    = true;
+            cur.dynamic_score = 1.0;
             return;
         }
 
