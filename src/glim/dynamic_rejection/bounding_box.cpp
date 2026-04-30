@@ -68,6 +68,11 @@ void BoundingBox::transform(const Eigen::Isometry3d& T) {
 
 
 
+void BoundingBox::inflate(double margin) {
+    size += Eigen::Vector3d::Constant(2.0 * margin);
+    half_size = size * 0.5;
+}
+
 double BoundingBox::iou(const BoundingBox& other) const {
     // Intersezione: clamp dei bound sovrapposti
     const Eigen::Vector3d inter_min = (center - half_size).cwiseMax(other.center - other.half_size);

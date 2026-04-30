@@ -18,6 +18,8 @@ public:
     /// Returns true if `inner` is fully contained inside this bbox (AABB check).
     bool contains_bbox(const BoundingBox& inner) const;
     void transform(const Eigen::Isometry3d& T);
+    /// Expands the bounding box by `margin` in all directions (adds margin on each side per axis).
+    void inflate(double margin);
     double iou(const BoundingBox& other) const;
     // -----------------------------------------------------------------------
     // Getters (needed by WallBBoxRegistry for IoU / merge operations)

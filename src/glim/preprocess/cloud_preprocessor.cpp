@@ -182,7 +182,7 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::Const
   }
 
   preprocessed->k_neighbors = params.k_correspondences;
-  if (params.dynamic_rejection_type == "NONE") {
+  if (params.dynamic_rejection_type == "NONE" || params.dynamic_rejection_type == "FILTERED") {
     preprocessed->neighbors = find_neighbors(frame->points, frame->size(), params.k_correspondences);
   }
 
