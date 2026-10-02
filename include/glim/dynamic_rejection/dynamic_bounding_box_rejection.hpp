@@ -1,4 +1,5 @@
 #include <memory>
+#include <unordered_set>
 #include <vector>
 #include <Eigen/Geometry>
 #include <glim/dynamic_rejection/bounding_box.hpp>
@@ -22,6 +23,7 @@ public:
     void insert_bounding_boxes(BoundingBox& bbox);
     std::vector<BoundingBox> get_bounding_boxes() const { return bboxes_; }
     void set_bounding_boxes(const std::vector<BoundingBox>& bboxes);
+    void remove_bounding_boxes_by_track_ids(const std::unordered_set<int>& track_ids);
     PreprocessedFrame::Ptr get_last_dynamic_frame() const { return last_dynamic_frame; }
     std::vector<int> get_last_removed_counts() const { return last_removed_counts_; }
 

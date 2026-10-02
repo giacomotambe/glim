@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <unordered_set>
 #include <spdlog/spdlog.h>
 #include <gtsam_points/config.hpp>
 #include <gtsam_points/ann/kdtree.hpp>
@@ -64,8 +65,7 @@ PreprocessedFrame::Ptr DynamicBBoxRejection::reject(const PreprocessedFrame::Ptr
         bool is_dynamic = false;
         for (size_t bbox_idx = 0; bbox_idx < bboxes_.size(); ++bbox_idx) {
             const auto& bbox = bboxes_[bbox_idx];
-            if (bbox.contains(point) ||
-                bbox.contains_inflated(point, inflate_params_)) {
+            if (bbox.contains_inflated(point, inflate_params_)) {
                 is_dynamic = true;
                 if (bbox_idx < last_removed_counts_.size()) {
                     ++last_removed_counts_[bbox_idx];
@@ -98,8 +98,12 @@ PreprocessedFrame::Ptr DynamicBBoxRejection::reject(const PreprocessedFrame::Ptr
         preprocessed->intensities = filtered_intensities;
     }
 
-    preprocessed->k_neighbors = frame->k_neighbors;
-    preprocessed->neighbors = find_neighbors(filtered_points.data(), static_cast<int>(filtered_points.size()), frame->k_neighbors);
+    // Guard against uninitialized k_neighbors from older binaries (ABI mismatch).
+    const int k = (frame->k_neighbors > 0 && frame->k_neighbors <= 100) ? frame->k_neighbors : 10;
+    preprocessed->k_neighbors = k;
+    if (!filtered_points.empty()) {
+        preprocessed->neighbors = find_neighbors(filtered_points.data(), static_cast<int>(filtered_points.size()), k);
+    }
     spdlog::trace("preprocessed: {} -> {} points", frame->size(), preprocessed->size());
 
     if (!dynamic_points.empty()) {
@@ -126,6 +130,31 @@ void DynamicBBoxRejection::insert_bounding_boxes(BoundingBox& bbox) {
 void DynamicBBoxRejection::set_bounding_boxes(const std::vector<BoundingBox>& bboxes) {
     bboxes_ = bboxes;
     bbox_ages_.assign(bboxes_.size(), 0);
+    last_removed_counts_.assign(bboxes_.size(), 0);
+}
+
+void DynamicBBoxRejection::remove_bounding_boxes_by_track_ids(const std::unordered_set<int>& track_ids) {
+    if (track_ids.empty() || bboxes_.empty()) {
+        return;
+    }
+
+    std::vector<BoundingBox> kept_bboxes;
+    std::vector<int> kept_ages;
+    kept_bboxes.reserve(bboxes_.size());
+    kept_ages.reserve(bbox_ages_.size());
+
+    for (size_t i = 0; i < bboxes_.size(); ++i) {
+        const int track_id = bboxes_[i].get_track_id();
+        if (track_id >= 0 && track_ids.find(track_id) != track_ids.end()) {
+            continue;
+        }
+
+        kept_bboxes.push_back(bboxes_[i]);
+        kept_ages.push_back(i < bbox_ages_.size() ? bbox_ages_[i] : 0);
+    }
+
+    bboxes_ = std::move(kept_bboxes);
+    bbox_ages_ = std::move(kept_ages);
     last_removed_counts_.assign(bboxes_.size(), 0);
 }
 

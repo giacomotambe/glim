@@ -3,6 +3,8 @@
 #include <memory>
 #include <vector>
 #include <iostream>
+#include <cstdint>
+#include <limits>
 #include <spdlog/spdlog.h>
 #include <boost/format.hpp>
 
@@ -62,7 +64,34 @@ Eigen::Vector4d get_vec4(const void* x, const void* y, const void* z) {
 }
 
 static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const std::string& intensity_channel, const std::string& ring_channel) {
-  int num_points = points_msg.width * points_msg.height;
+  const std::uint64_t num_points64 =
+    static_cast<std::uint64_t>(points_msg.width) * static_cast<std::uint64_t>(points_msg.height);
+
+  if (num_points64 == 0) {
+    spdlog::warn("empty PointCloud2 message (width={} height={})", points_msg.width, points_msg.height);
+    return nullptr;
+  }
+
+  if (num_points64 > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    spdlog::warn("PointCloud2 message is too large (width={} height={} points={})",
+                 points_msg.width, points_msg.height, num_points64);
+    return nullptr;
+  }
+
+  if (points_msg.point_step == 0) {
+    spdlog::warn("invalid PointCloud2 point_step=0");
+    return nullptr;
+  }
+
+  const std::uint64_t min_data_size =
+    static_cast<std::uint64_t>(points_msg.point_step) * num_points64;
+  if (points_msg.data.size() < min_data_size) {
+    spdlog::warn("PointCloud2 data buffer is smaller than expected (data={} expected_at_least={} width={} height={} point_step={})",
+                 points_msg.data.size(), min_data_size, points_msg.width, points_msg.height, points_msg.point_step);
+    return nullptr;
+  }
+
+  const int num_points = static_cast<int>(num_points64);
 
   int x_type = 0;
   int y_type = 0;

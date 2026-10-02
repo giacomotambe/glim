@@ -1,5 +1,8 @@
 #include <glim/common/cloud_deskewing.hpp>
 
+#include <algorithm>
+#include <cmath>
+
 #include <gtsam/geometry/Pose3.h>
 
 namespace glim {
@@ -25,7 +28,11 @@ std::vector<Eigen::Vector4d> CloudDeskewing::deskew(
   std::vector<double> time_table;
   std::vector<int> time_indices;
 
-  time_table.reserve((times.back() - times.front()) / time_eps * 1.5);
+  const auto time_minmax = std::minmax_element(times.begin(), times.end());
+  const double time_span = *time_minmax.second - *time_minmax.first;
+  if (std::isfinite(time_span) && time_span > 0.0) {
+    time_table.reserve(static_cast<std::size_t>(time_span / time_eps * 1.5) + 1);
+  }
   time_indices.reserve(points.size());
 
   for (int i = 0; i < times.size(); i++) {
@@ -71,7 +78,11 @@ std::vector<Eigen::Vector4d> CloudDeskewing::deskew(
   const double time_eps = 1e-4;
   std::vector<double> time_table;
   std::vector<int> time_indices;
-  time_table.reserve((times.back() - times.front()) / time_eps * 1.2);
+  const auto time_minmax = std::minmax_element(times.begin(), times.end());
+  const double time_span = *time_minmax.second - *time_minmax.first;
+  if (std::isfinite(time_span) && time_span > 0.0) {
+    time_table.reserve(static_cast<std::size_t>(time_span / time_eps * 1.2) + 1);
+  }
   time_indices.reserve(times.size());
 
   // create time table
